@@ -44,6 +44,24 @@ on:
         type: boolean
         default: true
 
+      deploy-user:
+        description: 'User to run the deployment (e.g., n8n-work)'
+        required: false
+        type: string
+        default: 'n8n-work'
+
+      container-runtime:
+        description: 'Container runtime (docker or podman)'
+        required: false
+        type: string
+        default: 'podman'
+
+      health-check-path:
+        description: 'Health check endpoint path'
+        required: false
+        type: string
+        default: '/health'
+
 jobs:
   # ============================================
   # CI/CD Pipeline
@@ -105,7 +123,9 @@ jobs:
           name: ${{ inputs.api-name }}
           image: ${{ inputs.api-name }}:latest
           port: ${{ inputs.api-port }}:${{ inputs.api-port }}
-          network: app-network
+          runtime: ${{ inputs.container-runtime }}
+          user: ${{ inputs.deploy-user }}
+          network: n8n-network
           env-vars: |
             ENVIRONMENT=${{ inputs.environment }}
             VERSION=${{ github.sha }}
@@ -117,11 +137,19 @@ jobs:
       # VERIFY
       # ============================================
       - name: Health check
-        uses: ./actions/deploy/health-check
-        with:
-          url: http://localhost:${{ inputs.api-port }}/health
-          retries: 10
-          delay: 5
+        shell: bash
+        run: |
+          echo "🏥 Performing health check..."
+          for i in {1..10}; do
+            if curl -f http://localhost:${{ inputs.api-port }}${{ inputs.health-check-path }} 2>/dev/null; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            echo "⏳ Attempt $i/10 - Waiting 5 seconds..."
+            sleep 5
+          done
+          echo "❌ Health check failed after 10 attempts"
+          exit 1
 
       # ============================================
       # NOTIFY (Always)
