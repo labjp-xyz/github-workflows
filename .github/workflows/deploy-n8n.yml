@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Deploy n8n complete stack
-        uses: ./actions/apps/n8n/deploy-stack
+        uses: ./.github/actions/apps/n8n/deploy-stack
         with:
           n8n-version: ${{ inputs.n8n-version }}
           environment: ${{ inputs.environment }}
@@ -34,7 +34,7 @@ jobs:
           n8n-host: ${{ secrets.N8N_HOST }}
 
       - name: Deploy HEIC Converter API
-        uses: ./actions/deploy/container
+        uses: ./.github/actions/deploy/container
         with:
           name: heic-converter-api
           image: heic-converter:latest
@@ -45,7 +45,7 @@ jobs:
             ENVIRONMENT=${{ inputs.environment }}
 
       - name: Health checks
-        uses: ./actions/deploy/health-check
+        uses: ./.github/actions/deploy/health-check
         with:
           services: |
             http://localhost:5678/healthz:n8n
@@ -53,7 +53,7 @@ jobs:
 
       - name: Notify deployment
         if: always()
-        uses: ./actions/notify/slack
+        uses: ./.github/actions/notify/slack
         with:
           webhook-url: ${{ secrets.SLACK_WEBHOOK }}
           status: ${{ job.status }}
