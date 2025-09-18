@@ -22,9 +22,11 @@ github-workflows/
 │       └── n8n/
 │           └── deploy-stack/    # Deploy stack completo n8n
 │
-└── workflows/                    # 📋 PIPELINES COMPLETOS
-    ├── deploy-api.yml           # Pipeline genérico para APIs
-    └── deploy-n8n.yml           # Pipeline específico para n8n
+└── .github/
+    └── workflows/               # 📋 PIPELINES COMPLETOS
+        ├── deploy-api.yml       # Pipeline genérico para APIs
+        ├── deploy-n8n.yml       # Pipeline específico para n8n
+        └── test-workflows.yml   # Tests internos del repo
 ```
 
 ## 🎯 Diferencia entre Actions y Workflows
@@ -48,7 +50,7 @@ on:
 
 jobs:
   deploy:
-    uses: tu-usuario/github-workflows/workflows/deploy-api.yml@v1.0.0
+    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
     with:
       api-name: mi-api
       api-path: ./src
@@ -72,7 +74,7 @@ on:
 
 jobs:
   deploy:
-    uses: tu-usuario/github-workflows/workflows/deploy-n8n.yml@v1.0.0
+    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-n8n.yml@main
     with:
       environment: production
       n8n-version: latest
@@ -227,7 +229,7 @@ Pipeline específico para n8n con PostgreSQL y Redis.
 ### 1. Crear repositorio GitHub
 ```bash
 gh repo create github-workflows --public
-git clone https://github.com/tu-usuario/github-workflows
+git clone https://github.com/jeanlopezxyz/github-workflows
 ```
 
 ### 2. Subir código
@@ -246,7 +248,7 @@ git push origin v1.0.0
 
 ### 4. En tus proyectos, referenciar
 ```yaml
-uses: tu-usuario/github-workflows/workflows/deploy-api.yml@v1.0.0
+uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
 ```
 
 ## 🎯 Decisión: ¿Qué workflow usar?
