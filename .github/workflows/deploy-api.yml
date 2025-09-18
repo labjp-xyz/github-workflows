@@ -130,8 +130,6 @@ jobs:
             ENVIRONMENT=${{ inputs.environment }}
             VERSION=${{ github.sha }}
           restart: unless-stopped
-          runtime: podman
-          user: app-user
 
       # ============================================
       # VERIFY

@@ -22,13 +22,11 @@ github-workflows/
 │       └── n8n/
 │           └── deploy-stack/    # Deploy stack completo n8n
 │
-├── workflows/                   # 📋 WORKFLOWS REUTILIZABLES
-│   ├── deploy-api.yml          # Pipeline genérico para APIs
-│   └── deploy-n8n.yml          # Pipeline específico para n8n
-│
 └── .github/
-    └── workflows/               # ⚙️ CI/CD INTERNO DEL REPO
-        └── test-workflows.yml   # Tests y validación
+    └── workflows/               # 📋 WORKFLOWS REUTILIZABLES Y CI/CD
+        ├── deploy-api.yml       # Pipeline genérico para APIs (reutilizable)
+        ├── deploy-n8n.yml       # Pipeline específico para n8n (reutilizable)
+        └── test-workflows.yml   # Tests internos del repo
 ```
 
 ## 🎯 Diferencia entre Actions y Workflows
@@ -52,7 +50,7 @@ on:
 
 jobs:
   deploy:
-    uses: jeanlopezxyz/github-workflows/workflows/deploy-api.yml@main
+    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
     with:
       api-name: mi-api
       api-path: ./src
@@ -76,7 +74,7 @@ on:
 
 jobs:
   deploy:
-    uses: jeanlopezxyz/github-workflows/workflows/deploy-n8n.yml@main
+    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-n8n.yml@main
     with:
       environment: production
       n8n-version: latest

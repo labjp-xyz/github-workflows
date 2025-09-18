@@ -20,16 +20,11 @@ jobs:
           pip install yamllint
 
           # Validar todos los workflows reutilizables
-          find workflows -name "*.yml" -o -name "*.yaml" | while read file; do
+          find .github/workflows -name "*.yml" -o -name "*.yaml" | grep -v test-workflows.yml | while read file; do
             echo "Validating $file..."
             yamllint -d relaxed "$file"
           done
 
-          # Validar workflows de CI del propio repo
-          find .github/workflows -name "*.yml" -o -name "*.yaml" | while read file; do
-            echo "Validating $file..."
-            yamllint -d relaxed "$file"
-          done
 
   test-workflow-calls:
     name: Test Workflow Calls
@@ -40,7 +35,7 @@ jobs:
       - name: Check workflow_call triggers
         run: |
           # Verificar que todos los workflows reutilizables tienen workflow_call
-          find workflows -name "*.yml" -o -name "*.yaml" | while read file; do
+          find .github/workflows -name "*.yml" -o -name "*.yaml" | grep -v test-workflows.yml | while read file; do
             if ! grep -q "workflow_call:" "$file"; then
               echo "❌ $file missing workflow_call trigger"
               exit 1
