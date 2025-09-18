@@ -1,0 +1,74 @@
+name: Test Workflows
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-yaml:
+    name: Validate YAML Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate workflow files
+        run: |
+          # Instalar yamllint
+          pip install yamllint
+
+          # Validar todos los workflows
+          find workflows -name "*.yml" -o -name "*.yaml" | while read file; do
+            echo "Validating $file..."
+            yamllint -d relaxed "$file"
+          done
+
+  test-workflow-calls:
+    name: Test Workflow Calls
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check workflow_call triggers
+        run: |
+          # Verificar que todos los workflows tienen workflow_call
+          for file in workflows/**/*.yml; do
+            if ! grep -q "workflow_call:" "$file"; then
+              echo "❌ $file missing workflow_call trigger"
+              exit 1
+            fi
+          done
+          echo "✅ All workflows are callable"
+
+  documentation:
+    name: Check Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for documentation
+        run: |
+          # Verificar que cada workflow tiene documentación
+          for category in workflows/*/; do
+            if [ ! -f "$category/README.md" ]; then
+              echo "⚠️ Missing README.md in $category"
+            fi
+          done
+
+  version-check:
+    name: Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "Current version: $VERSION"
+
+          # Verificar que el CHANGELOG tiene esta versión
+          if ! grep -q "\[$VERSION\]" CHANGELOG.md; then
+            echo "❌ Version $VERSION not found in CHANGELOG.md"
+            exit 1
+          fi

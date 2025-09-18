@@ -1,0 +1,149 @@
+name: 'Deploy Container'
+description: 'Deploy container using Podman/Docker'
+author: 'Your Name'
+
+inputs:
+  name:
+    description: 'Container name'
+    required: true
+  image:
+    description: 'Container image'
+    required: true
+  port:
+    description: 'Port mapping (host:container)'
+    required: false
+    default: ''
+  network:
+    description: 'Network name'
+    required: false
+    default: 'bridge'
+  env-file:
+    description: 'Environment file path'
+    required: false
+    default: ''
+  env-vars:
+    description: 'Environment variables (KEY=VALUE format, one per line)'
+    required: false
+    default: ''
+  volumes:
+    description: 'Volume mappings (host:container format, one per line)'
+    required: false
+    default: ''
+  restart:
+    description: 'Restart policy'
+    required: false
+    default: 'unless-stopped'
+  runtime:
+    description: 'Container runtime (docker or podman)'
+    required: false
+    default: 'podman'
+  user:
+    description: 'User to run container (for podman)'
+    required: false
+    default: ''
+
+outputs:
+  container-id:
+    description: 'Container ID'
+    value: ${{ steps.deploy.outputs.id }}
+  status:
+    description: 'Container status'
+    value: ${{ steps.verify.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup runtime command
+      id: setup
+      shell: bash
+      run: |
+        # Determine runtime command
+        if [ "${{ inputs.user }}" != "" ] && [ "${{ inputs.runtime }}" = "podman" ]; then
+          CMD="sudo -u ${{ inputs.user }} podman"
+        else
+          CMD="${{ inputs.runtime }}"
+        fi
+        echo "cmd=$CMD" >> $GITHUB_OUTPUT
+
+    - name: Stop existing container
+      shell: bash
+      run: |
+        echo "🛑 Stopping existing container if running..."
+        ${{ steps.setup.outputs.cmd }} stop ${{ inputs.name }} 2>/dev/null || true
+        ${{ steps.setup.outputs.cmd }} rm ${{ inputs.name }} 2>/dev/null || true
+
+    - name: Create network if needed
+      shell: bash
+      run: |
+        if [ "${{ inputs.network }}" != "bridge" ] && [ "${{ inputs.network }}" != "" ]; then
+          echo "🌐 Creating network: ${{ inputs.network }}"
+          ${{ steps.setup.outputs.cmd }} network create ${{ inputs.network }} 2>/dev/null || true
+        fi
+
+    - name: Deploy container
+      id: deploy
+      shell: bash
+      run: |
+        echo "🚀 Deploying container: ${{ inputs.name }}"
+
+        # Build command
+        DEPLOY_CMD="${{ steps.setup.outputs.cmd }} run -d --name ${{ inputs.name }}"
+
+        # Add restart policy
+        DEPLOY_CMD="$DEPLOY_CMD --restart ${{ inputs.restart }}"
+
+        # Add network
+        if [ "${{ inputs.network }}" != "" ]; then
+          DEPLOY_CMD="$DEPLOY_CMD --network ${{ inputs.network }}"
+        fi
+
+        # Add port mapping
+        if [ "${{ inputs.port }}" != "" ]; then
+          DEPLOY_CMD="$DEPLOY_CMD -p ${{ inputs.port }}"
+        fi
+
+        # Add environment file
+        if [ "${{ inputs.env-file }}" != "" ] && [ -f "${{ inputs.env-file }}" ]; then
+          DEPLOY_CMD="$DEPLOY_CMD --env-file ${{ inputs.env-file }}"
+        fi
+
+        # Add environment variables
+        if [ "${{ inputs.env-vars }}" != "" ]; then
+          while IFS= read -r env_var; do
+            if [ ! -z "$env_var" ]; then
+              DEPLOY_CMD="$DEPLOY_CMD -e $env_var"
+            fi
+          done <<< "${{ inputs.env-vars }}"
+        fi
+
+        # Add volumes
+        if [ "${{ inputs.volumes }}" != "" ]; then
+          while IFS= read -r volume; do
+            if [ ! -z "$volume" ]; then
+              DEPLOY_CMD="$DEPLOY_CMD -v $volume"
+            fi
+          done <<< "${{ inputs.volumes }}"
+        fi
+
+        # Add image
+        DEPLOY_CMD="$DEPLOY_CMD ${{ inputs.image }}"
+
+        # Execute deployment
+        CONTAINER_ID=$($DEPLOY_CMD)
+        echo "id=$CONTAINER_ID" >> $GITHUB_OUTPUT
+        echo "✅ Container deployed with ID: $CONTAINER_ID"
+
+    - name: Verify container
+      id: verify
+      shell: bash
+      run: |
+        sleep 3
+        STATUS=$(${{ steps.setup.outputs.cmd }} ps --filter "name=${{ inputs.name }}" --format "{{.Status}}")
+        echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+        if [ -z "$STATUS" ]; then
+          echo "❌ Container is not running"
+          exit 1
+        else
+          echo "✅ Container status: $STATUS"
+        fi

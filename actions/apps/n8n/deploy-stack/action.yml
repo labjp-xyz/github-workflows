@@ -1,0 +1,109 @@
+name: 'Deploy n8n Stack'
+description: 'Deploy complete n8n stack with PostgreSQL and Redis'
+author: 'Your Name'
+
+inputs:
+  n8n-version:
+    description: 'n8n version'
+    required: false
+    default: 'latest'
+  postgres-password:
+    description: 'PostgreSQL password'
+    required: true
+  n8n-user:
+    description: 'n8n admin user'
+    required: true
+  n8n-password:
+    description: 'n8n admin password'
+    required: true
+  n8n-host:
+    description: 'n8n host domain'
+    required: false
+    default: 'localhost'
+  environment:
+    description: 'Environment'
+    required: false
+    default: 'production'
+
+outputs:
+  n8n-url:
+    description: 'n8n access URL'
+    value: http://localhost:5678
+  status:
+    description: 'Deployment status'
+    value: ${{ steps.verify.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Deploy PostgreSQL
+      uses: ../../deploy/container
+      with:
+        name: n8n-postgres
+        image: postgres:15-alpine
+        port: '5432:5432'
+        network: n8n-network
+        env-vars: |
+          POSTGRES_DB=n8n
+          POSTGRES_USER=n8n
+          POSTGRES_PASSWORD=${{ inputs.postgres-password }}
+        volumes: |
+          n8n-postgres-data:/var/lib/postgresql/data
+
+    - name: Deploy Redis
+      uses: ../../deploy/container
+      with:
+        name: n8n-redis
+        image: redis:7-alpine
+        port: '6379:6379'
+        network: n8n-network
+        volumes: |
+          n8n-redis-data:/data
+
+    - name: Wait for services
+      shell: bash
+      run: |
+        echo "⏳ Waiting for services..."
+        sleep 10
+
+    - name: Deploy n8n
+      uses: ../../deploy/container
+      with:
+        name: n8n
+        image: n8nio/n8n:${{ inputs.n8n-version }}
+        port: '5678:5678'
+        network: n8n-network
+        env-vars: |
+          NODE_ENV=${{ inputs.environment }}
+          DB_TYPE=postgresdb
+          DB_POSTGRESDB_HOST=n8n-postgres
+          DB_POSTGRESDB_PORT=5432
+          DB_POSTGRESDB_DATABASE=n8n
+          DB_POSTGRESDB_USER=n8n
+          DB_POSTGRESDB_PASSWORD=${{ inputs.postgres-password }}
+          QUEUE_BULL_REDIS_HOST=n8n-redis
+          QUEUE_BULL_REDIS_PORT=6379
+          N8N_BASIC_AUTH_ACTIVE=true
+          N8N_BASIC_AUTH_USER=${{ inputs.n8n-user }}
+          N8N_BASIC_AUTH_PASSWORD=${{ inputs.n8n-password }}
+          N8N_HOST=${{ inputs.n8n-host }}
+          EXECUTIONS_MODE=queue
+        volumes: |
+          n8n-data:/home/node/.n8n
+          n8n-files:/files
+
+    - name: Verify deployment
+      id: verify
+      shell: bash
+      run: |
+        for i in {1..30}; do
+          if curl -f http://localhost:5678/healthz; then
+            echo "✅ n8n stack is ready!"
+            echo "status=success" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "❌ n8n stack failed to start"
+        echo "status=failed" >> $GITHUB_OUTPUT
+        exit 1

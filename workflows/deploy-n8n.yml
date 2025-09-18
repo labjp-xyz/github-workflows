@@ -1,0 +1,60 @@
+name: Deploy n8n Application
+
+# Este es un WORKFLOW que usa ACTIONS para desplegar n8n
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        type: string
+        default: 'production'
+      n8n-version:
+        description: 'n8n version'
+        type: string
+        default: 'latest'
+
+jobs:
+  deploy-n8n:
+    name: Deploy n8n Stack
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy n8n complete stack
+        uses: ./actions/apps/n8n/deploy-stack
+        with:
+          n8n-version: ${{ inputs.n8n-version }}
+          environment: ${{ inputs.environment }}
+          postgres-password: ${{ secrets.N8N_DB_PASSWORD }}
+          n8n-user: ${{ secrets.N8N_USER }}
+          n8n-password: ${{ secrets.N8N_PASSWORD }}
+          n8n-host: ${{ secrets.N8N_HOST }}
+
+      - name: Deploy HEIC Converter API
+        uses: ./actions/deploy/container
+        with:
+          name: heic-converter-api
+          image: heic-converter:latest
+          port: '5000:5000'
+          network: n8n-network
+          env-vars: |
+            MAX_FILE_SIZE=104857600
+            ENVIRONMENT=${{ inputs.environment }}
+
+      - name: Health checks
+        uses: ./actions/deploy/health-check
+        with:
+          services: |
+            http://localhost:5678/healthz:n8n
+            http://localhost:5000/health:HEIC-API
+
+      - name: Notify deployment
+        if: always()
+        uses: ./actions/notify/slack
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          status: ${{ job.status }}
+          message: n8n stack deployed to ${{ inputs.environment }}

@@ -1,0 +1,82 @@
+name: 'Container Security Scan'
+description: 'Scan container image for vulnerabilities using Trivy'
+author: 'Your Name'
+
+inputs:
+  image:
+    description: 'Container image to scan'
+    required: true
+  severity:
+    description: 'Minimum severity level (LOW, MEDIUM, HIGH, CRITICAL)'
+    required: false
+    default: 'HIGH'
+  format:
+    description: 'Output format (table, json, sarif)'
+    required: false
+    default: 'table'
+  exit-code:
+    description: 'Exit code when vulnerabilities found'
+    required: false
+    default: '1'
+
+outputs:
+  vulnerabilities-found:
+    description: 'Number of vulnerabilities found'
+    value: ${{ steps.scan.outputs.count }}
+  report:
+    description: 'Path to scan report'
+    value: ${{ steps.scan.outputs.report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Trivy
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy -y
+
+    - name: Run security scan
+      id: scan
+      shell: bash
+      run: |
+        echo "🔍 Scanning image: ${{ inputs.image }}"
+
+        # Run scan and capture output
+        REPORT_FILE="trivy-report-$(date +%s).txt"
+
+        trivy image \
+          --severity ${{ inputs.severity }} \
+          --format ${{ inputs.format }} \
+          --exit-code ${{ inputs.exit-code }} \
+          --output $REPORT_FILE \
+          ${{ inputs.image }}
+
+        # Count vulnerabilities
+        if [ "${{ inputs.format }}" = "table" ]; then
+          COUNT=$(grep -c "CVE-" $REPORT_FILE || true)
+        else
+          COUNT="N/A"
+        fi
+
+        echo "count=$COUNT" >> $GITHUB_OUTPUT
+        echo "report=$REPORT_FILE" >> $GITHUB_OUTPUT
+
+        if [ "$COUNT" != "0" ] && [ "$COUNT" != "N/A" ]; then
+          echo "⚠️ Found $COUNT vulnerabilities"
+        else
+          echo "✅ No vulnerabilities found"
+        fi
+
+    - name: Upload scan report
+      if: always()
+      shell: bash
+      run: |
+        if [ -f "${{ steps.scan.outputs.report }}" ]; then
+          echo "📊 Scan Report:"
+          cat ${{ steps.scan.outputs.report }}
+        fi

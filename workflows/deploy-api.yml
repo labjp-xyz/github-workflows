@@ -1,0 +1,138 @@
+name: Deploy API
+
+# Workflow genérico para CI/CD completo de cualquier API
+
+on:
+  workflow_call:
+    inputs:
+      api-name:
+        description: 'API name'
+        required: true
+        type: string
+
+      api-path:
+        description: 'API source path'
+        required: true
+        type: string
+
+      api-type:
+        description: 'API type (python, node, go)'
+        required: true
+        type: string
+
+      api-port:
+        description: 'API port'
+        required: false
+        type: string
+        default: '3000'
+
+      environment:
+        description: 'Environment (development, staging, production)'
+        required: false
+        type: string
+        default: 'production'
+
+      run-tests:
+        description: 'Run tests before deploy'
+        required: false
+        type: boolean
+        default: true
+
+      security-scan:
+        description: 'Run security scan'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # ============================================
+  # CI/CD Pipeline
+  # ============================================
+  deploy:
+    name: Deploy ${{ inputs.api-name }}
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================
+      # TESTING (Optional)
+      # ============================================
+      - name: Run Python tests
+        if: inputs.run-tests && inputs.api-type == 'python'
+        uses: ./actions/test/python
+        with:
+          working-directory: ${{ inputs.api-path }}
+
+      - name: Run Node tests
+        if: inputs.run-tests && inputs.api-type == 'node'
+        uses: ./actions/test/node
+        with:
+          working-directory: ${{ inputs.api-path }}
+
+      # ============================================
+      # BUILD
+      # ============================================
+      - name: Build container image
+        id: build
+        uses: ./actions/build/container
+        with:
+          context: ${{ inputs.api-path }}
+          image-name: ${{ inputs.api-name }}
+          tags: |
+            latest
+            ${{ inputs.environment }}
+            ${{ github.sha }}
+
+      # ============================================
+      # SECURITY (Optional)
+      # ============================================
+      - name: Security scan
+        if: inputs.security-scan
+        uses: ./actions/security/scan-container
+        with:
+          image: ${{ inputs.api-name }}:latest
+          severity: HIGH
+          exit-code: '0'  # Warning only, don't fail
+
+      # ============================================
+      # DEPLOY
+      # ============================================
+      - name: Deploy container
+        uses: ./actions/deploy/container
+        with:
+          name: ${{ inputs.api-name }}
+          image: ${{ inputs.api-name }}:latest
+          port: ${{ inputs.api-port }}:${{ inputs.api-port }}
+          network: app-network
+          env-vars: |
+            ENVIRONMENT=${{ inputs.environment }}
+            VERSION=${{ github.sha }}
+          restart: unless-stopped
+          runtime: podman
+          user: app-user
+
+      # ============================================
+      # VERIFY
+      # ============================================
+      - name: Health check
+        uses: ./actions/deploy/health-check
+        with:
+          url: http://localhost:${{ inputs.api-port }}/health
+          retries: 10
+          delay: 5
+
+      # ============================================
+      # NOTIFY (Always)
+      # ============================================
+      - name: Notify status
+        if: always()
+        uses: ./actions/notify/slack
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          status: ${{ job.status }}
+          message: |
+            Deployment: ${{ inputs.api-name }}
+            Environment: ${{ inputs.environment }}
+            Status: ${{ job.status }}
