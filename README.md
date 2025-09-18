@@ -22,11 +22,13 @@ github-workflows/
 │       └── n8n/
 │           └── deploy-stack/    # Deploy stack completo n8n
 │
+├── workflows/                   # 📋 WORKFLOWS REUTILIZABLES
+│   ├── deploy-api.yml          # Pipeline genérico para APIs
+│   └── deploy-n8n.yml          # Pipeline específico para n8n
+│
 └── .github/
-    └── workflows/               # 📋 PIPELINES COMPLETOS
-        ├── deploy-api.yml       # Pipeline genérico para APIs
-        ├── deploy-n8n.yml       # Pipeline específico para n8n
-        └── test-workflows.yml   # Tests internos del repo
+    └── workflows/               # ⚙️ CI/CD INTERNO DEL REPO
+        └── test-workflows.yml   # Tests y validación
 ```
 
 ## 🎯 Diferencia entre Actions y Workflows
@@ -50,7 +52,7 @@ on:
 
 jobs:
   deploy:
-    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
+    uses: jeanlopezxyz/github-workflows/workflows/deploy-api.yml@main
     with:
       api-name: mi-api
       api-path: ./src
@@ -74,7 +76,7 @@ on:
 
 jobs:
   deploy:
-    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: jeanlopezxyz/github-workflows/workflows/deploy-n8n.yml@main
     with:
       environment: production
       n8n-version: latest
@@ -248,7 +250,7 @@ git push origin v1.0.0
 
 ### 4. En tus proyectos, referenciar
 ```yaml
-uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
+uses: jeanlopezxyz/github-workflows/workflows/deploy-api.yml@main
 ```
 
 ## 🎯 Decisión: ¿Qué workflow usar?
