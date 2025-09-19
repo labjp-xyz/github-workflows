@@ -11,7 +11,9 @@ Centralized repository for reusable GitHub Actions workflows and composite actio
 │   ├── podman-deploy/ # Deploy containers with Podman
 │   └── health-check/  # Health verification
 └── workflows/         # Reusable workflows
-    └── deploy-n8n.yml # Complete n8n deployment pipeline
+    ├── ci-generic.yml # Generic CI for containerized apps
+    ├── cd-deploy.yml  # Generic CD for deployments
+    └── deploy-api.yml # API deployment pipeline
 ```
 
 ## Available Workflows
@@ -35,13 +37,14 @@ Generic CD workflow for application deployment.
 - Automatic rollback on failure
 - Post-deployment notifications
 
-### Application-Specific Workflows
-
-#### deploy-n8n.yml
-Complete CI/CD pipeline for n8n deployment with PostgreSQL.
+### Application Workflows
 
 #### deploy-api.yml
 Generic API deployment pipeline using the core CI/CD workflows.
+- Supports any containerized application
+- Optional PostgreSQL database
+- Configurable health checks
+- Environment-based deployments
 
 #### Features
 - 🔨 **Build Stage**: Multi-platform Docker image builds
@@ -143,11 +146,14 @@ Performs health checks on deployed services.
 
 ## Examples
 
-### Basic Deployment
+### Basic API Deployment
 ```yaml
 jobs:
   deploy:
-    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-api.yml@main
+    with:
+      app-name: my-api
+      app-port: '3000'
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -156,8 +162,10 @@ jobs:
 ```yaml
 jobs:
   deploy:
-    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-api.yml@main
     with:
+      app-name: my-api
+      app-port: '3000'
       skip-build: true
       image-tag: v1.2.3
     secrets:
@@ -168,16 +176,20 @@ jobs:
 ```yaml
 jobs:
   deploy-staging:
-    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-api.yml@main
     with:
+      app-name: my-api
+      app-port: '3000'
       environment: staging
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
   deploy-production:
     needs: deploy-staging
-    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-api.yml@main
     with:
+      app-name: my-api
+      app-port: '3000'
       environment: production
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
