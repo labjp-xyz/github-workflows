@@ -203,12 +203,20 @@ jobs:
       status: ${{ steps.scan.outputs.status }}
 
     steps:
+      - name: Get first image tag for scanning
+        id: get-image
+        run: |
+          # Extract first tag only for Trivy
+          FIRST_TAG=$(echo "${{ needs.build.outputs.image }}" | head -n1)
+          echo "image=${FIRST_TAG}" >> $GITHUB_OUTPUT
+          echo "Scanning image: ${FIRST_TAG}"
+
       - name: Run Trivy vulnerability scanner
         id: scan
         uses: aquasecurity/trivy-action@master
         continue-on-error: true
         with:
-          image-ref: ${{ needs.build.outputs.image }}
+          image-ref: ${{ steps.get-image.outputs.image }}
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
@@ -219,13 +227,14 @@ jobs:
         uses: aquasecurity/trivy-action@master
         if: always()
         with:
-          image-ref: ${{ needs.build.outputs.image }}
+          image-ref: ${{ steps.get-image.outputs.image }}
           format: 'sarif'
           output: 'trivy-results.sarif'
 
       - name: Upload to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
+        continue-on-error: true
         with:
           sarif_file: 'trivy-results.sarif'
 
