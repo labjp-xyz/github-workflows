@@ -1,24 +1,39 @@
-name: Deploy n8n Application
+name: n8n Complete CI/CD Pipeline
 
 on:
   workflow_call:
     inputs:
+      # CI Configuration
       skip-build:
         description: 'Skip build stage (use existing image)'
         type: boolean
         default: false
+      dockerfile-path:
+        description: 'Path to Dockerfile'
+        type: string
+        default: './docker/images/n8n/Dockerfile'
+      platforms:
+        description: 'Target platforms for build'
+        type: string
+        default: 'linux/amd64'
+      run-tests:
+        description: 'Run tests during CI'
+        type: boolean
+        default: true
+      run-security-scan:
+        description: 'Run security scan'
+        type: boolean
+        default: true
+
+      # CD Configuration
       environment:
         description: 'Deployment environment'
         type: string
         default: 'production'
       image-tag:
-        description: 'Image tag to deploy'
+        description: 'Image tag to deploy (when skip-build=true)'
         type: string
         default: 'latest'
-      dockerfile-path:
-        description: 'Path to Dockerfile'
-        type: string
-        default: './docker/images/n8n/Dockerfile'
       deployment-path:
         description: 'Server deployment path'
         type: string
@@ -27,164 +42,137 @@ on:
         description: 'Runner labels in JSON array format'
         type: string
         default: '["self-hosted"]'
+      deploy-only:
+        description: 'Only run deployment (skip CI)'
+        type: boolean
+        default: false
     secrets:
       github-token:
         description: 'GitHub token for registry'
         required: true
+      postgres-password:
+        description: 'PostgreSQL password'
+        required: false
 
 jobs:
   # ============================================
-  # BUILD STAGE
+  # DECISION GATE
   # ============================================
-  build:
-    name: 🔨 Build n8n Image
-    if: inputs.skip-build == false
+  decide:
+    name: 🎯 Determine Pipeline Path
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.build.outputs.image }}
-      digest: ${{ steps.build.outputs.digest }}
+      run-ci: ${{ steps.decide.outputs.run-ci }}
+      run-cd: ${{ steps.decide.outputs.run-cd }}
+      image-to-deploy: ${{ steps.decide.outputs.image }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build and push image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          registry: ghcr.io
-          image-name: ${{ github.repository_owner }}/n8n
-          dockerfile: ${{ inputs.dockerfile-path }}
-          context: .
-          platforms: linux/amd64
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.github-token }}
-
-  # ============================================
-  # SECURITY SCAN STAGE
-  # ============================================
-  security-scan:
-    name: 🔐 Security Scan
-    needs: build
-    if: inputs.skip-build == false
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ needs.build.outputs.image }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-
-      - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-  # ============================================
-  # DEPLOY STAGE
-  # ============================================
-  deploy:
-    name: 🚀 Deploy to ${{ inputs.environment }}
-    needs: [build, security-scan]
-    if: always() && (needs.build.result == 'success' || inputs.skip-build == true)
-    runs-on: ${{ fromJson(inputs.runner-labels) }}
-
-    env:
-      DEPLOYMENT_PATH: ${{ inputs.deployment-path }}
-      ENVIRONMENT: ${{ inputs.environment }}
-
-    outputs:
-      url: ${{ steps.deploy.outputs.deployment-url }}
-
-    steps:
-      - name: Checkout deployment scripts
-        uses: actions/checkout@v4
-
-      - name: Determine image to deploy
-        id: image
+      - name: Determine pipeline path
+        id: decide
         run: |
-          if [[ "${{ inputs.skip-build }}" == "true" ]]; then
-            IMAGE="ghcr.io/${{ github.repository_owner }}/n8n:${{ inputs.image-tag }}"
+          echo "🎯 Determining pipeline path..."
+
+          if [[ "${{ inputs.deploy-only }}" == "true" ]]; then
+            echo "run-ci=false" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "image=ghcr.io/${{ github.repository_owner }}/n8n:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+            echo "📦 Deploy-only mode: Will deploy existing image"
+          elif [[ "${{ inputs.skip-build }}" == "true" ]]; then
+            echo "run-ci=false" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "image=ghcr.io/${{ github.repository_owner }}/n8n:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+            echo "⏭️ Skip-build mode: Will deploy existing image"
           else
-            IMAGE="${{ needs.build.outputs.image }}"
-          fi
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
-          echo "📦 Will deploy image: $IMAGE"
-
-      - name: Deploy n8n with PostgreSQL
-        id: deploy
-        uses: ./.github/actions/podman-deploy
-        with:
-          deployment-path: ${{ env.DEPLOYMENT_PATH }}
-          user: n8n
-          postgres-enabled: true
-          app-image: ${{ steps.image.outputs.image }}
-          app-name: n8n
-          app-port: 5678
-          network-name: n8n-network
-
-  # ============================================
-  # HEALTH CHECK STAGE
-  # ============================================
-  health-check:
-    name: ✅ Health Verification
-    needs: deploy
-    runs-on: ${{ fromJson(inputs.runner-labels) }}
-
-    steps:
-      - name: Checkout actions
-        uses: actions/checkout@v4
-
-      - name: Run health checks
-        uses: ./.github/actions/health-check
-        with:
-          service-url: ${{ needs.deploy.outputs.url }}
-          wait-time: 30
-          max-retries: 10
-          user: n8n
-          postgres-check: true
-          app-name: n8n
-
-      - name: Functional test
-        run: |
-          echo "🧪 Running functional tests..."
-
-          # Test API endpoint
-          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ needs.deploy.outputs.url }}/api/v1/health)
-          if [[ $response == "200" ]]; then
-            echo "✅ API health check passed"
-          else
-            echo "❌ API health check failed with status: $response"
-            exit 1
+            echo "run-ci=true" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "🔨 Full pipeline: Will build and deploy"
           fi
 
   # ============================================
-  # NOTIFICATION STAGE
+  # CI PIPELINE (Build, Test, Scan)
   # ============================================
-  notify:
-    name: 📢 Send Notifications
-    needs: [deploy, health-check]
+  ci:
+    name: 🔨 CI Pipeline
+    needs: decide
+    if: needs.decide.outputs.run-ci == 'true'
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      dockerfile-path: ${{ inputs.dockerfile-path }}
+      platforms: ${{ inputs.platforms }}
+      push-image: true
+      run-tests: ${{ inputs.run-tests }}
+      run-security-scan: ${{ inputs.run-security-scan }}
+      image-name: ${{ github.repository_owner }}/n8n
+    secrets:
+      registry-token: ${{ secrets.github-token }}
+
+  # ============================================
+  # CD PIPELINE (Deploy)
+  # ============================================
+  cd:
+    name: 🚀 CD Pipeline
+    needs: [decide, ci]
+    if: |
+      always() &&
+      needs.decide.outputs.run-cd == 'true' &&
+      (needs.ci.result == 'success' || needs.ci.result == 'skipped')
+    uses: ./.github/workflows/cd-deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image: ${{ needs.ci.outputs.image || needs.decide.outputs.image-to-deploy }}
+      deployment-path: ${{ inputs.deployment-path }}
+      app-name: n8n
+      app-port: '5678'
+      postgres-enabled: true
+      runner-labels: ${{ inputs.runner-labels }}
+      health-check-enabled: true
+      rollback-on-failure: ${{ inputs.environment == 'production' }}
+    secrets:
+      postgres-password: ${{ secrets.postgres-password }}
+
+  # ============================================
+  # PIPELINE SUMMARY
+  # ============================================
+  summary:
+    name: 📊 Pipeline Summary
+    needs: [ci, cd]
     if: always()
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deployment status
+      - name: Generate pipeline summary
         run: |
-          STATUS="${{ needs.health-check.result }}"
-          ENV="${{ inputs.environment }}"
-          URL="${{ needs.deploy.outputs.url }}"
+          echo "# 📊 n8n CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [[ "$STATUS" == "success" ]]; then
-            echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Environment:** $ENV" >> $GITHUB_STEP_SUMMARY
-            echo "**URL:** $URL" >> $GITHUB_STEP_SUMMARY
-            echo "**Status:** All health checks passed" >> $GITHUB_STEP_SUMMARY
+          # CI Summary
+          if [[ "${{ needs.ci.result }}" == "success" ]]; then
+            echo "## ✅ CI Pipeline: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Image:** ${{ needs.ci.outputs.image }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tests:** ${{ needs.ci.outputs.test-status }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Security:** ${{ needs.ci.outputs.scan-status }}" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.ci.result }}" == "skipped" ]]; then
+            echo "## ⏭️ CI Pipeline: SKIPPED" >> $GITHUB_STEP_SUMMARY
+            echo "Using existing image for deployment" >> $GITHUB_STEP_SUMMARY
           else
-            echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Environment:** $ENV" >> $GITHUB_STEP_SUMMARY
-            echo "**Status:** Check logs for details" >> $GITHUB_STEP_SUMMARY
+            echo "## ❌ CI Pipeline: FAILED" >> $GITHUB_STEP_SUMMARY
           fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # CD Summary
+          if [[ "${{ needs.cd.result }}" == "success" ]]; then
+            echo "## ✅ CD Pipeline: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **URL:** ${{ needs.cd.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Status:** ${{ needs.cd.outputs.deployment-status }}" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.cd.result }}" == "skipped" ]]; then
+            echo "## ⏭️ CD Pipeline: SKIPPED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ CD Pipeline: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "Check logs for details" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "🕐 Completed at: $(date)" >> $GITHUB_STEP_SUMMARY

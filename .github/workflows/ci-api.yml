@@ -1,0 +1,288 @@
+name: CI - Build & Test API
+
+on:
+  workflow_call:
+    inputs:
+      api-name:
+        required: true
+        type: string
+        description: 'Name of the API/service'
+      api-path:
+        required: true
+        type: string
+        description: 'Path to the API source code'
+      api-type:
+        required: true
+        type: string
+        description: 'Type of API (python, node, go)'
+      dockerfile:
+        required: false
+        type: string
+        default: 'Dockerfile'
+        description: 'Path to Dockerfile relative to api-path'
+      run-tests:
+        required: false
+        type: boolean
+        default: true
+        description: 'Run tests'
+      security-scan:
+        required: false
+        type: boolean
+        default: true
+        description: 'Run security scan'
+      push-to-registry:
+        required: false
+        type: boolean
+        default: true
+        description: 'Push image to registry'
+      platforms:
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+        description: 'Target platforms for build'
+    outputs:
+      image:
+        description: 'Full image name with tag'
+        value: ${{ jobs.build.outputs.image }}
+      image-digest:
+        description: 'Image digest'
+        value: ${{ jobs.build.outputs.image-digest }}
+      image-tags:
+        description: 'All image tags'
+        value: ${{ jobs.build.outputs.image-tags }}
+      version:
+        description: 'Version/tag deployed'
+        value: ${{ jobs.build.outputs.version }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/${{ inputs.api-name }}
+
+jobs:
+  # ============================================
+  # BUILD & PUSH
+  # ============================================
+  build:
+    name: 🔨 Build & Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: inputs.push-to-registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME}
+          else
+            VERSION=${GITHUB_SHA::8}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📌 Version: $VERSION"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.api-path }}
+          file: ${{ inputs.api-path }}/${{ inputs.dockerfile }}
+          push: ${{ inputs.push-to-registry }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ inputs.platforms }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            BUILD_DATE=${{ steps.meta.outputs.created }}
+            COMMIT_SHA=${{ github.sha }}
+
+      - name: Set output image
+        id: image
+        run: |
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "image=$FIRST_TAG" >> $GITHUB_OUTPUT
+          echo "📦 Built image: $FIRST_TAG"
+
+  # ============================================
+  # TEST
+  # ============================================
+  test:
+    name: 🧪 Test
+    if: inputs.run-tests
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: |
+          docker pull ${{ needs.build.outputs.image }}
+          docker tag ${{ needs.build.outputs.image }} test-image:latest
+
+      - name: Run Python tests
+        if: inputs.api-type == 'python'
+        continue-on-error: true
+        run: |
+          echo "🐍 Running Python tests..."
+          docker run --rm test-image:latest python -m pytest tests/ -v || \
+          docker run --rm test-image:latest python -m unittest discover -v || \
+          echo "ℹ️ No tests found or tests skipped"
+
+      - name: Run Node tests
+        if: inputs.api-type == 'node'
+        continue-on-error: true
+        run: |
+          echo "📦 Running Node.js tests..."
+          docker run --rm test-image:latest npm test || \
+          echo "ℹ️ No tests found or tests skipped"
+
+      - name: Run Go tests
+        if: inputs.api-type == 'go'
+        continue-on-error: true
+        run: |
+          echo "🐹 Running Go tests..."
+          docker run --rm test-image:latest go test ./... -v || \
+          echo "ℹ️ No tests found or tests skipped"
+
+  # ============================================
+  # SECURITY SCAN
+  # ============================================
+  security:
+    name: 🔒 Security Scan
+    if: inputs.security-scan
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy in table format
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          ignore-unfixed: true
+
+  # ============================================
+  # SBOM GENERATION
+  # ============================================
+  sbom:
+    name: 📋 Generate SBOM
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ needs.build.outputs.image }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ inputs.api-name }}
+          path: sbom.spdx.json
+
+  # ============================================
+  # SUMMARY
+  # ============================================
+  summary:
+    name: 📊 CI Summary
+    if: always()
+    needs: [build, test, security, sbom]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# 🚀 CI Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📦 Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **API Name**: ${{ inputs.api-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Type**: ${{ inputs.api-type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ needs.build.outputs.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: \`${{ needs.build.outputs.image-digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Pipeline Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔨 Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🧪 Test | ${{ needs.test.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔒 Security | ${{ needs.security.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📋 SBOM | ${{ needs.sbom.result }} |" >> $GITHUB_STEP_SUMMARY

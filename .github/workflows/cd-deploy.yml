@@ -1,0 +1,329 @@
+name: CD - Deploy Application
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        type: string
+        required: true
+      image:
+        description: 'Container image to deploy'
+        type: string
+        required: true
+      deployment-path:
+        description: 'Server deployment path'
+        type: string
+        default: '/opt/app'
+      app-name:
+        description: 'Application name'
+        type: string
+        default: 'app'
+      app-port:
+        description: 'Application port'
+        type: string
+        default: '8080'
+      postgres-enabled:
+        description: 'Deploy with PostgreSQL'
+        type: boolean
+        default: false
+      runner-labels:
+        description: 'Runner labels (JSON array)'
+        type: string
+        default: '["self-hosted"]'
+      health-check-enabled:
+        description: 'Run health checks after deployment'
+        type: boolean
+        default: true
+      rollback-on-failure:
+        description: 'Rollback on deployment failure'
+        type: boolean
+        default: true
+    outputs:
+      deployment-url:
+        description: 'Application URL'
+        value: ${{ jobs.deploy.outputs.url }}
+      deployment-status:
+        description: 'Deployment status'
+        value: ${{ jobs.verify.outputs.status }}
+    secrets:
+      postgres-password:
+        description: 'PostgreSQL password'
+        required: false
+      app-secrets:
+        description: 'Application secrets (JSON format)'
+        required: false
+
+jobs:
+  # ============================================
+  # PRE-DEPLOYMENT CHECKS
+  # ============================================
+  pre-deploy:
+    name: 🔍 Pre-deployment Checks
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+    outputs:
+      can-deploy: ${{ steps.check.outputs.can-deploy }}
+      current-version: ${{ steps.check.outputs.current-version }}
+
+    steps:
+      - name: Check deployment prerequisites
+        id: check
+        run: |
+          echo "🔍 Running pre-deployment checks for ${{ inputs.environment }}..."
+
+          # Check if podman/docker is available
+          if command -v podman &> /dev/null; then
+            CONTAINER_RUNTIME="podman"
+          elif command -v docker &> /dev/null; then
+            CONTAINER_RUNTIME="docker"
+          else
+            echo "❌ No container runtime found"
+            echo "can-deploy=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "✅ Container runtime: $CONTAINER_RUNTIME"
+
+          # Check current running version
+          CURRENT_VERSION=$($CONTAINER_RUNTIME inspect ${{ inputs.app-name }} --format '{{.Config.Image}}' 2>/dev/null || echo "none")
+          echo "📦 Current version: $CURRENT_VERSION"
+          echo "current-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          # Check disk space
+          DISK_USAGE=$(df -h ${{ inputs.deployment-path }} 2>/dev/null | awk 'NR==2 {print $5}' | sed 's/%//' || echo "0")
+          if [[ $DISK_USAGE -gt 90 ]]; then
+            echo "⚠️ Warning: Disk usage is at ${DISK_USAGE}%"
+          fi
+
+          echo "can-deploy=true" >> $GITHUB_OUTPUT
+          echo "✅ Pre-deployment checks passed"
+
+  # ============================================
+  # BACKUP STAGE (Production only)
+  # ============================================
+  backup:
+    name: 💾 Backup Current State
+    needs: pre-deploy
+    if: inputs.environment == 'production' && needs.pre-deploy.outputs.can-deploy == 'true'
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+
+    steps:
+      - name: Backup database
+        if: inputs.postgres-enabled == true
+        run: |
+          echo "💾 Creating database backup..."
+
+          # Determine container runtime
+          if command -v podman &> /dev/null; then
+            CONTAINER_RUNTIME="podman"
+          else
+            CONTAINER_RUNTIME="docker"
+          fi
+
+          # Create backup
+          BACKUP_FILE="${{ inputs.deployment-path }}/backups/db-$(date +%Y%m%d-%H%M%S).sql"
+          mkdir -p $(dirname $BACKUP_FILE)
+
+          $CONTAINER_RUNTIME exec ${{ inputs.app-name }}-postgres \
+            pg_dump -U ${{ inputs.app-name }} ${{ inputs.app-name }} > $BACKUP_FILE 2>/dev/null || true
+
+          if [[ -f $BACKUP_FILE ]]; then
+            echo "✅ Database backed up to: $BACKUP_FILE"
+          else
+            echo "⚠️ No database to backup or backup failed"
+          fi
+
+      - name: Tag current image
+        run: |
+          echo "🏷️ Tagging current image for rollback..."
+
+          if command -v podman &> /dev/null; then
+            CONTAINER_RUNTIME="podman"
+          else
+            CONTAINER_RUNTIME="docker"
+          fi
+
+          # Tag current image as rollback
+          CURRENT_IMAGE="${{ needs.pre-deploy.outputs.current-version }}"
+          if [[ "$CURRENT_IMAGE" != "none" ]]; then
+            $CONTAINER_RUNTIME tag $CURRENT_IMAGE ${{ inputs.app-name }}:rollback 2>/dev/null || true
+            echo "✅ Current image tagged as :rollback"
+          fi
+
+  # ============================================
+  # DEPLOYMENT STAGE
+  # ============================================
+  deploy:
+    name: 🚀 Deploy to ${{ inputs.environment }}
+    needs: [pre-deploy, backup]
+    if: always() && needs.pre-deploy.outputs.can-deploy == 'true'
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+      deployment-id: ${{ steps.deploy.outputs.deployment-id }}
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions
+
+      - name: Deploy application
+        id: deploy
+        uses: ./.github/actions/podman-deploy
+        with:
+          deployment-path: ${{ inputs.deployment-path }}
+          user: ${{ inputs.app-name }}
+          postgres-enabled: ${{ inputs.postgres-enabled }}
+          postgres-password: ${{ secrets.postgres-password }}
+          app-image: ${{ inputs.image }}
+          app-name: ${{ inputs.app-name }}
+          app-port: ${{ inputs.app-port }}
+          network-name: ${{ inputs.app-name }}-network
+
+      - name: Set deployment ID
+        run: |
+          DEPLOYMENT_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "📋 Deployment ID: $DEPLOYMENT_ID"
+
+  # ============================================
+  # VERIFICATION STAGE
+  # ============================================
+  verify:
+    name: ✅ Verify Deployment
+    needs: deploy
+    if: inputs.health-check-enabled == true
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+    outputs:
+      status: ${{ steps.health.outputs.status }}
+
+    steps:
+      - name: Checkout actions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions
+
+      - name: Run health checks
+        id: health
+        uses: ./.github/actions/health-check
+        with:
+          service-url: ${{ needs.deploy.outputs.url }}
+          wait-time: 30
+          max-retries: 10
+          user: ${{ inputs.app-name }}
+          postgres-check: ${{ inputs.postgres-enabled }}
+          app-name: ${{ inputs.app-name }}
+
+      - name: Run smoke tests
+        id: smoke
+        run: |
+          echo "🔥 Running smoke tests..."
+
+          URL="${{ needs.deploy.outputs.url }}"
+
+          # Basic connectivity test
+          if curl -f -s -o /dev/null -w "%{http_code}" "$URL" | grep -q "200\|301\|302"; then
+            echo "✅ Application is responding"
+            echo "status=healthy" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Application is not responding"
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  # ============================================
+  # ROLLBACK STAGE (On Failure)
+  # ============================================
+  rollback:
+    name: 🔄 Rollback Deployment
+    needs: [deploy, verify]
+    if: failure() && inputs.rollback-on-failure == true && inputs.environment == 'production'
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+
+    steps:
+      - name: Rollback to previous version
+        run: |
+          echo "🔄 Rolling back deployment..."
+
+          if command -v podman &> /dev/null; then
+            CONTAINER_RUNTIME="podman"
+          else
+            CONTAINER_RUNTIME="docker"
+          fi
+
+          # Stop current container
+          $CONTAINER_RUNTIME stop ${{ inputs.app-name }} 2>/dev/null || true
+          $CONTAINER_RUNTIME rm -f ${{ inputs.app-name }} 2>/dev/null || true
+
+          # Deploy rollback image
+          if $CONTAINER_RUNTIME image exists ${{ inputs.app-name }}:rollback; then
+            $CONTAINER_RUNTIME run -d \
+              --name ${{ inputs.app-name }} \
+              --network ${{ inputs.app-name }}-network \
+              -p ${{ inputs.app-port }}:${{ inputs.app-port }} \
+              --restart always \
+              ${{ inputs.app-name }}:rollback
+
+            echo "✅ Rolled back to previous version"
+          else
+            echo "❌ No rollback image available"
+            exit 1
+          fi
+
+      - name: Verify rollback
+        run: |
+          sleep 10
+          URL="http://localhost:${{ inputs.app-port }}"
+
+          if curl -f -s -o /dev/null -w "%{http_code}" "$URL" | grep -q "200\|301\|302"; then
+            echo "✅ Rollback successful - application is responding"
+          else
+            echo "❌ Rollback failed - application is not responding"
+            echo "🚨 MANUAL INTERVENTION REQUIRED"
+            exit 1
+          fi
+
+  # ============================================
+  # POST-DEPLOYMENT
+  # ============================================
+  post-deploy:
+    name: 📋 Post-deployment Tasks
+    needs: [deploy, verify]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate deployment summary
+        run: |
+          echo "### 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Application:** ${{ inputs.app-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ inputs.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ needs.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment ID:** ${{ needs.deploy.outputs.deployment-id }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.verify.outputs.status }}" == "healthy" ]]; then
+            echo "### ✅ Status: Successfully Deployed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Status: Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ inputs.rollback-on-failure }}" == "true" ]]; then
+              echo "🔄 Automatic rollback was triggered" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Send notification
+        if: inputs.environment == 'production'
+        run: |
+          STATUS="${{ needs.verify.outputs.status }}"
+          if [[ "$STATUS" == "healthy" ]]; then
+            echo "📧 Sending success notification..."
+            # Add notification logic here (Slack, email, etc.)
+          else
+            echo "📧 Sending failure notification..."
+            # Add notification logic here
+          fi

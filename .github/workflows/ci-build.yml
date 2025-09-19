@@ -1,0 +1,297 @@
+name: CI - Build and Test
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile-path:
+        description: 'Path to Dockerfile'
+        type: string
+        default: './Dockerfile'
+      context:
+        description: 'Build context'
+        type: string
+        default: '.'
+      platforms:
+        description: 'Target platforms'
+        type: string
+        default: 'linux/amd64'
+      push-image:
+        description: 'Push image to registry'
+        type: boolean
+        default: true
+      run-tests:
+        description: 'Run tests'
+        type: boolean
+        default: true
+      run-security-scan:
+        description: 'Run security scan'
+        type: boolean
+        default: true
+      image-name:
+        description: 'Image name (without registry)'
+        type: string
+        default: ''
+    outputs:
+      image:
+        description: 'Full image reference'
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: 'Image digest'
+        value: ${{ jobs.build.outputs.digest }}
+      version:
+        description: 'Image version'
+        value: ${{ jobs.build.outputs.version }}
+      test-status:
+        description: 'Test execution status'
+        value: ${{ jobs.test.outputs.status }}
+      scan-status:
+        description: 'Security scan status'
+        value: ${{ jobs.security-scan.outputs.status }}
+    secrets:
+      registry-token:
+        description: 'Registry authentication token'
+        required: false
+
+jobs:
+  # ============================================
+  # BUILD STAGE
+  # ============================================
+  build:
+    name: 🔨 Build Container Image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: inputs.push-image == true
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-token || github.token }}
+
+      - name: Generate image name
+        id: image
+        run: |
+          if [[ -n "${{ inputs.image-name }}" ]]; then
+            IMAGE_NAME="${{ inputs.image-name }}"
+          else
+            # Default to repository name
+            IMAGE_NAME="${{ github.repository }}"
+          fi
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.run_number }}
+
+      - name: Build and conditionally push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile-path }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push-image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,name=ghcr.io/${{ steps.image.outputs.name }},push-by-digest=${{ inputs.push-image }}
+
+      - name: Generate build summary
+        run: |
+          echo "### 🔨 Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ghcr.io/${{ steps.image.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ inputs.platforms }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.push-image }}" == "true" ]]; then
+            echo "**Status:** ✅ Pushed to registry" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** 📦 Built locally (not pushed)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================
+  # TEST STAGE
+  # ============================================
+  test:
+    name: 🧪 Run Tests
+    needs: build
+    if: inputs.run-tests == true
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.test.outputs.status }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up test environment
+        run: |
+          echo "🧪 Setting up test environment..."
+          # Add any test setup here
+
+      - name: Run unit tests
+        id: test
+        continue-on-error: true
+        run: |
+          echo "🧪 Running unit tests..."
+
+          # Check if test script exists
+          if [[ -f "run-tests.sh" ]]; then
+            ./run-tests.sh
+            TEST_RESULT=$?
+          elif [[ -f "package.json" ]] && grep -q '"test"' package.json; then
+            npm test
+            TEST_RESULT=$?
+          elif [[ -f "Makefile" ]] && grep -q '^test:' Makefile; then
+            make test
+            TEST_RESULT=$?
+          else
+            echo "⚠️ No test configuration found, skipping tests"
+            TEST_RESULT=0
+          fi
+
+          if [[ $TEST_RESULT -eq 0 ]]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+            echo "✅ All tests passed"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Some tests failed"
+            exit 1
+          fi
+
+      - name: Generate test report
+        if: always()
+        run: |
+          echo "### 🧪 Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.test.outputs.status }}" == "passed" ]]; then
+            echo "**Status:** ✅ All tests passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** ❌ Tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================
+  # SECURITY SCAN STAGE
+  # ============================================
+  security-scan:
+    name: 🔒 Security Scan
+    needs: build
+    if: inputs.run-security-scan == true && inputs.push-image == true
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        id: scan
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Set scan status
+        if: always()
+        run: |
+          if [[ "${{ steps.scan.outcome }}" == "success" ]]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+            echo "### 🔒 Security Scan Passed" >> $GITHUB_STEP_SUMMARY
+            echo "No critical vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "### ⚠️ Security Vulnerabilities Found" >> $GITHUB_STEP_SUMMARY
+            echo "Check the Security tab for details" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================
+  # QUALITY GATE
+  # ============================================
+  quality-gate:
+    name: 🎯 Quality Gate
+    needs: [build, test, security-scan]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check quality gate
+        run: |
+          echo "### 🎯 CI Quality Gate Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          GATE_PASSED=true
+
+          # Check build status
+          echo "**Build:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+
+          # Check test status
+          if [[ "${{ inputs.run-tests }}" == "true" ]]; then
+            if [[ "${{ needs.test.outputs.status }}" == "passed" ]]; then
+              echo "**Tests:** ✅ Passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Tests:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+              GATE_PASSED=false
+            fi
+          else
+            echo "**Tests:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check security scan status
+          if [[ "${{ inputs.run-security-scan }}" == "true" ]]; then
+            if [[ "${{ needs.security-scan.outputs.status }}" == "passed" ]]; then
+              echo "**Security:** ✅ No critical issues" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Security:** ⚠️ Vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+              # Don't fail gate for security issues, just warn
+            fi
+          else
+            echo "**Security:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$GATE_PASSED" == "true" ]]; then
+            echo "### ✅ Quality Gate: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Quality Gate: FAILED" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
