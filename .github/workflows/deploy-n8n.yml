@@ -1,60 +1,190 @@
 name: Deploy n8n Application
 
-# Este es un WORKFLOW que usa ACTIONS para desplegar n8n
-
 on:
   workflow_call:
     inputs:
+      skip-build:
+        description: 'Skip build stage (use existing image)'
+        type: boolean
+        default: false
       environment:
-        description: 'Environment to deploy'
+        description: 'Deployment environment'
         type: string
         default: 'production'
-      n8n-version:
-        description: 'n8n version'
+      image-tag:
+        description: 'Image tag to deploy'
         type: string
         default: 'latest'
+      dockerfile-path:
+        description: 'Path to Dockerfile'
+        type: string
+        default: './docker/images/n8n/Dockerfile'
+      deployment-path:
+        description: 'Server deployment path'
+        type: string
+        default: '/opt/n8n'
+      runner-labels:
+        description: 'Runner labels in JSON array format'
+        type: string
+        default: '["self-hosted"]'
+    secrets:
+      github-token:
+        description: 'GitHub token for registry'
+        required: true
 
 jobs:
-  deploy-n8n:
-    name: Deploy n8n Stack
-    runs-on: [self-hosted, linux, x64]
+  # ============================================
+  # BUILD STAGE
+  # ============================================
+  build:
+    name: 🔨 Build n8n Image
+    if: inputs.skip-build == false
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy n8n complete stack
-        uses: ./.github/actions/apps/n8n/deploy-stack
+      - name: Build and push image
+        id: build
+        uses: ./.github/actions/docker-build
         with:
-          n8n-version: ${{ inputs.n8n-version }}
-          environment: ${{ inputs.environment }}
-          postgres-password: ${{ secrets.N8N_DB_PASSWORD }}
-          n8n-user: ${{ secrets.N8N_USER }}
-          n8n-password: ${{ secrets.N8N_PASSWORD }}
-          n8n-host: ${{ secrets.N8N_HOST }}
+          registry: ghcr.io
+          image-name: ${{ github.repository_owner }}/n8n
+          dockerfile: ${{ inputs.dockerfile-path }}
+          context: .
+          platforms: linux/amd64
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.github-token }}
 
-      - name: Deploy HEIC Converter API
-        uses: ./.github/actions/deploy/container
-        with:
-          name: heic-converter-api
-          image: heic-converter:latest
-          port: '5000:5000'
-          network: n8n-network
-          env-vars: |
-            MAX_FILE_SIZE=104857600
-            ENVIRONMENT=${{ inputs.environment }}
+  # ============================================
+  # SECURITY SCAN STAGE
+  # ============================================
+  security-scan:
+    name: 🔐 Security Scan
+    needs: build
+    if: inputs.skip-build == false
+    runs-on: ubuntu-latest
 
-      - name: Health checks
-        uses: ./.github/actions/deploy/health-check
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
         with:
-          services: |
-            http://localhost:5678/healthz:n8n
-            http://localhost:5000/health:HEIC-API
+          image-ref: ${{ needs.build.outputs.image }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
 
-      - name: Notify deployment
-        if: always()
-        uses: ./.github/actions/notify/slack
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
-          status: ${{ job.status }}
-          message: n8n stack deployed to ${{ inputs.environment }}
+          sarif_file: 'trivy-results.sarif'
+
+  # ============================================
+  # DEPLOY STAGE
+  # ============================================
+  deploy:
+    name: 🚀 Deploy to ${{ inputs.environment }}
+    needs: [build, security-scan]
+    if: always() && (needs.build.result == 'success' || inputs.skip-build == true)
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+
+    env:
+      DEPLOYMENT_PATH: ${{ inputs.deployment-path }}
+      ENVIRONMENT: ${{ inputs.environment }}
+
+    outputs:
+      url: ${{ steps.deploy.outputs.deployment-url }}
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Determine image to deploy
+        id: image
+        run: |
+          if [[ "${{ inputs.skip-build }}" == "true" ]]; then
+            IMAGE="ghcr.io/${{ github.repository_owner }}/n8n:${{ inputs.image-tag }}"
+          else
+            IMAGE="${{ needs.build.outputs.image }}"
+          fi
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "📦 Will deploy image: $IMAGE"
+
+      - name: Deploy n8n with PostgreSQL
+        id: deploy
+        uses: ./.github/actions/podman-deploy
+        with:
+          deployment-path: ${{ env.DEPLOYMENT_PATH }}
+          user: n8n
+          postgres-enabled: true
+          app-image: ${{ steps.image.outputs.image }}
+          app-name: n8n
+          app-port: 5678
+          network-name: n8n-network
+
+  # ============================================
+  # HEALTH CHECK STAGE
+  # ============================================
+  health-check:
+    name: ✅ Health Verification
+    needs: deploy
+    runs-on: ${{ fromJson(inputs.runner-labels) }}
+
+    steps:
+      - name: Checkout actions
+        uses: actions/checkout@v4
+
+      - name: Run health checks
+        uses: ./.github/actions/health-check
+        with:
+          service-url: ${{ needs.deploy.outputs.url }}
+          wait-time: 30
+          max-retries: 10
+          user: n8n
+          postgres-check: true
+          app-name: n8n
+
+      - name: Functional test
+        run: |
+          echo "🧪 Running functional tests..."
+
+          # Test API endpoint
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ needs.deploy.outputs.url }}/api/v1/health)
+          if [[ $response == "200" ]]; then
+            echo "✅ API health check passed"
+          else
+            echo "❌ API health check failed with status: $response"
+            exit 1
+          fi
+
+  # ============================================
+  # NOTIFICATION STAGE
+  # ============================================
+  notify:
+    name: 📢 Send Notifications
+    needs: [deploy, health-check]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deployment status
+        run: |
+          STATUS="${{ needs.health-check.result }}"
+          ENV="${{ inputs.environment }}"
+          URL="${{ needs.deploy.outputs.url }}"
+
+          if [[ "$STATUS" == "success" ]]; then
+            echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Environment:** $ENV" >> $GITHUB_STEP_SUMMARY
+            echo "**URL:** $URL" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** All health checks passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Environment:** $ENV" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** Check logs for details" >> $GITHUB_STEP_SUMMARY
+          fi

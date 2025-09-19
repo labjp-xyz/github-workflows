@@ -1,71 +1,35 @@
-# 🚀 GitHub Actions & Workflows Library
+# GitHub Workflows Repository
 
-Biblioteca centralizada de **Actions** (componentes reutilizables) y **Workflows** (pipelines completos).
+Centralized repository for reusable GitHub Actions workflows and composite actions.
 
-## 📁 Estructura
+## Structure
 
 ```
-github-workflows/
-├── actions/                      # 🔧 COMPONENTES REUTILIZABLES
-│   ├── build/                   # Construcción de artefactos
-│   │   └── container/           # Build de imágenes Docker/Podman
-│   ├── deploy/                  # Despliegue
-│   │   └── container/           # Deploy de contenedores
-│   ├── security/                # Seguridad
-│   │   └── scan-container/      # Escaneo de vulnerabilidades
-│   ├── test/                    # Testing
-│   │   ├── python/              # Tests Python con pytest
-│   │   └── node/                # Tests Node.js
-│   ├── notify/                  # Notificaciones
-│   │   └── slack/               # Notificaciones Slack
-│   └── apps/                    # Específicas por aplicación
-│       └── n8n/
-│           └── deploy-stack/    # Deploy stack completo n8n
-│
-└── .github/
-    └── workflows/               # 📋 WORKFLOWS REUTILIZABLES Y CI/CD
-        ├── deploy-api.yml       # Pipeline genérico para APIs (reutilizable)
-        ├── deploy-n8n.yml       # Pipeline específico para n8n (reutilizable)
-        └── test-workflows.yml   # Tests internos del repo
+.github/
+├── actions/           # Reusable composite actions
+│   ├── docker-build/  # Build and push Docker images
+│   ├── podman-deploy/ # Deploy containers with Podman
+│   └── health-check/  # Health verification
+└── workflows/         # Reusable workflows
+    └── deploy-n8n.yml # Complete n8n deployment pipeline
 ```
 
-## 🎯 Diferencia entre Actions y Workflows
+## Available Workflows
 
-| Tipo | Qué es | Se usa para | Ejemplo |
-|------|--------|-------------|---------|
-| **Action** | Componente reutilizable | Una tarea específica | Escanear, deployar, notificar |
-| **Workflow** | Pipeline completo | Orquestar múltiples actions | CI/CD completo |
+### deploy-n8n.yml
 
-## 📖 Cómo Usar desde tus Proyectos
+Complete CI/CD pipeline for n8n deployment with PostgreSQL.
 
-### 1️⃣ Para APIs Simples (Python, Node, Go)
+#### Features
+- 🔨 **Build Stage**: Multi-platform Docker image builds
+- 🔒 **Security Scan**: Vulnerability scanning with Trivy
+- 🚀 **Deploy Stage**: Podman-based deployment
+- ✅ **Health Checks**: Automated health verification
+- 📢 **Notifications**: Status reporting
+
+#### Usage
 
 ```yaml
-# tu-proyecto/.github/workflows/deploy.yml
-name: Deploy My API
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-api.yml@main
-    with:
-      api-name: mi-api
-      api-path: ./src
-      api-type: python         # python, node, o go
-      api-port: '8000'
-      environment: production
-      run-tests: true          # Opcional: ejecutar tests
-      security-scan: true      # Opcional: escaneo de seguridad
-    secrets: inherit
-```
-
-### 2️⃣ Para n8n (Stack Complejo)
-
-```yaml
-# n8n-project/.github/workflows/deploy.yml
 name: Deploy n8n
 
 on:
@@ -74,228 +38,135 @@ on:
 
 jobs:
   deploy:
-    uses: jeanlopezxyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
     with:
+      skip-build: false
       environment: production
-      n8n-version: latest
+      image-tag: latest
+      dockerfile-path: ./docker/images/n8n/Dockerfile
+      deployment-path: /opt/n8n
+      runner-labels: '["self-hosted"]'
     secrets:
-      N8N_DB_PASSWORD: ${{ secrets.N8N_DB_PASSWORD }}
-      N8N_USER: ${{ secrets.N8N_USER }}
-      N8N_PASSWORD: ${{ secrets.N8N_PASSWORD }}
-      N8N_HOST: n8n.midominio.com
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-## 💡 Ejemplos Reales
+#### Inputs
 
-### HEIC Converter
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `skip-build` | Skip build stage | No | `false` |
+| `environment` | Deployment environment | No | `production` |
+| `image-tag` | Image tag to deploy | No | `latest` |
+| `dockerfile-path` | Path to Dockerfile | No | `./docker/images/n8n/Dockerfile` |
+| `deployment-path` | Server deployment path | No | `/opt/n8n` |
+| `runner-labels` | Runner labels (JSON array) | No | `["self-hosted"]` |
+
+## Available Actions
+
+### docker-build
+
+Builds and pushes Docker images to a container registry.
 
 ```yaml
-# heic-converter/.github/workflows/deploy.yml
-name: Deploy HEIC Converter
+- uses: labjp-xyz/github-workflows/.github/actions/docker-build@main
+  with:
+    registry: ghcr.io
+    image-name: ${{ github.repository_owner }}/my-app
+    dockerfile: ./Dockerfile
+    context: .
+    platforms: linux/amd64,linux/arm64
+    registry-username: ${{ github.actor }}
+    registry-password: ${{ secrets.GITHUB_TOKEN }}
+```
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'api/**'
-      - '.github/workflows/**'
+### podman-deploy
 
+Deploys containers using Podman with optional PostgreSQL.
+
+```yaml
+- uses: labjp-xyz/github-workflows/.github/actions/podman-deploy@main
+  with:
+    deployment-path: /opt/myapp
+    user: myapp
+    postgres-enabled: true
+    app-image: ghcr.io/owner/app:latest
+    app-name: myapp
+    app-port: 8080
+```
+
+### health-check
+
+Performs health checks on deployed services.
+
+```yaml
+- uses: labjp-xyz/github-workflows/.github/actions/health-check@main
+  with:
+    service-url: http://localhost:8080
+    wait-time: 30
+    max-retries: 10
+    postgres-check: true
+```
+
+## Requirements
+
+### Self-Hosted Runner
+- Container runtime: Podman or Docker
+- User permissions: Ability to run containers
+- Network access: GitHub, container registries
+
+### Repository Secrets
+- `GITHUB_TOKEN`: Automatically provided
+- Additional secrets as needed by your application
+
+## Examples
+
+### Basic Deployment
+```yaml
 jobs:
   deploy:
-    uses: jeanlopez/github-workflows/workflows/deploy-api.yml@v1.0.0
-    with:
-      api-name: heic-converter
-      api-path: ./api
-      api-type: python
-      api-port: '5000'
-      environment: production
-    secrets: inherit
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### API Node.js
-
+### Skip Build (Use Existing Image)
 ```yaml
-# nodejs-api/.github/workflows/deploy.yml
-name: Deploy Node API
-
-on:
-  push:
-    branches: [main]
-
 jobs:
   deploy:
-    uses: jeanlopez/github-workflows/workflows/deploy-api.yml@v1.0.0
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
     with:
-      api-name: backend-api
-      api-path: ./backend
-      api-type: node
-      api-port: '3000'
-      environment: production
-    secrets: inherit
+      skip-build: true
+      image-tag: v1.2.3
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### API Go
-
+### Multi-Environment Setup
 ```yaml
-# go-api/.github/workflows/deploy.yml
-name: Deploy Go API
-
-on:
-  push:
-    branches: [main]
-
 jobs:
-  deploy:
-    uses: jeanlopez/github-workflows/workflows/deploy-api.yml@v1.0.0
+  deploy-staging:
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
     with:
-      api-name: go-service
-      api-path: ./cmd/api
-      api-type: go
-      api-port: '8080'
+      environment: staging
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-production:
+    needs: deploy-staging
+    uses: labjp-xyz/github-workflows/.github/workflows/deploy-n8n.yml@main
+    with:
       environment: production
-      run-tests: true
-    secrets: inherit
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-## 🔧 Workflows Disponibles
+## Contributing
 
-### `deploy-api.yml`
-Pipeline CI/CD completo para APIs.
+1. Create feature branch
+2. Add/modify workflows or actions
+3. Test in your repository
+4. Submit pull request
 
-**Inputs:**
-- `api-name` (required): Nombre de la API
-- `api-path` (required): Path al código fuente
-- `api-type` (required): Tipo de API (python/node/go)
-- `api-port`: Puerto de la API (default: 3000)
-- `environment`: Ambiente (default: production)
-- `run-tests`: Ejecutar tests (default: true)
-- `security-scan`: Escaneo de seguridad (default: true)
+## License
 
-**Stages:**
-1. ✅ Testing (si `run-tests: true`)
-2. 🔨 Build de imagen
-3. 🔒 Security scan (si `security-scan: true`)
-4. 🚀 Deploy
-5. 🏥 Health check
-6. 📢 Notificación
-
-### `deploy-n8n.yml`
-Pipeline específico para n8n con PostgreSQL y Redis.
-
-**Inputs:**
-- `environment`: Ambiente (default: production)
-- `n8n-version`: Versión de n8n (default: latest)
-
-**Secrets requeridos:**
-- `N8N_DB_PASSWORD`: Password de PostgreSQL
-- `N8N_USER`: Usuario admin de n8n
-- `N8N_PASSWORD`: Password admin de n8n
-- `N8N_HOST`: Dominio de n8n
-
-**Despliega:**
-1. PostgreSQL 15
-2. Redis 7
-3. n8n
-4. APIs adicionales (HEIC converter, etc.)
-
-## 📊 Actions Disponibles
-
-### Build
-- `actions/build/container`: Construye imágenes Docker/Podman
-
-### Deploy
-- `actions/deploy/container`: Despliega contenedores
-- `actions/deploy/health-check`: Verifica salud del servicio
-
-### Security
-- `actions/security/scan-container`: Escanea vulnerabilidades con Trivy
-- `actions/security/scan-dependencies`: Escanea dependencias
-- `actions/security/scan-secrets`: Detecta secretos expuestos
-
-### Test
-- `actions/test/python`: Tests Python con pytest
-- `actions/test/node`: Tests Node.js con npm/yarn
-- `actions/test/smoke`: Tests de smoke post-deploy
-
-### Notify
-- `actions/notify/slack`: Notificaciones a Slack
-- `actions/notify/email`: Notificaciones por email
-
-### Apps Específicas
-- `actions/apps/n8n/deploy-stack`: Deploy completo de n8n
-
-## 🚀 Setup Inicial
-
-### 1. Crear repositorio GitHub
-```bash
-gh repo create github-workflows --public
-git clone https://github.com/jeanlopezxyz/github-workflows
-```
-
-### 2. Subir código
-```bash
-cd github-workflows
-git add .
-git commit -m "Initial release"
-git push origin main
-```
-
-### 3. Crear tag de versión
-```bash
-git tag -a v1.0.0 -m "Release v1.0.0"
-git push origin v1.0.0
-```
-
-### 4. En tus proyectos, referenciar
-```yaml
-uses: jeanlopezxyz/github-workflows/workflows/deploy-api.yml@main
-```
-
-## 🎯 Decisión: ¿Qué workflow usar?
-
-| Si tu app... | Usa | Ejemplo |
-|--------------|-----|---------|
-| Es una API simple (REST, GraphQL) | `deploy-api.yml` | HEIC Converter, Backend API |
-| Es una aplicación web estática | `deploy-frontend.yml` | React, Vue (próximamente) |
-| Necesita múltiples servicios | `deploy-n8n.yml` o crear específico | n8n + PostgreSQL + Redis |
-| Es un microservicio | `deploy-api.yml` | Cualquier microservicio |
-
-## 🔐 Secrets Requeridos
-
-En tu repositorio, configura estos secrets (Settings → Secrets → Actions):
-
-### Para todas las APIs
-- `SLACK_WEBHOOK`: URL del webhook de Slack (opcional)
-- `DEPLOY_HOST`: Host del servidor de despliegue
-
-### Para n8n específicamente
-- `N8N_DB_PASSWORD`: Password de PostgreSQL
-- `N8N_USER`: Usuario admin
-- `N8N_PASSWORD`: Password admin
-- `N8N_HOST`: Dominio (ej: n8n.tudominio.com)
-
-## 🏷️ Versionado
-
-- `@v1.0.0`: Versión específica (recomendado para producción)
-- `@v1`: Última versión 1.x.x
-- `@main`: Última versión de desarrollo (no usar en producción)
-
-## 📈 Roadmap
-
-- [ ] `deploy-frontend.yml` para apps React/Vue/Angular
-- [ ] `deploy-mobile.yml` para apps móviles
-- [ ] Actions para AWS/GCP/Azure
-- [ ] Integración con Kubernetes
-- [ ] Métricas y monitoring
-
-## 🤝 Contribuir
-
-1. Fork el repositorio
-2. Crea una branch (`git checkout -b feature/nueva-action`)
-3. Commit cambios (`git commit -am 'Add nueva action'`)
-4. Push a la branch (`git push origin feature/nueva-action`)
-5. Crea un Pull Request
-
-## 📄 Licencia
-
-MIT - Libre para uso comercial y personal.
+MIT
