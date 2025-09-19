@@ -48,37 +48,32 @@ runs:
     - name: Stop existing containers
       shell: bash
       run: |
-        sudo -u ${{ inputs.user }} bash -c '
-          echo "🛑 Stopping existing containers..."
+        echo "🛑 Stopping existing containers..."
 
-          # Stop and remove existing containers
-          podman stop $(podman ps -q --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
-          podman rm -f $(podman ps -aq --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
+        # Stop and remove existing containers
+        podman stop $(podman ps -q --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
+        podman rm -f $(podman ps -aq --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
 
-          if [[ "${{ inputs.postgres-enabled }}" == "true" ]]; then
-            podman stop $(podman ps -q --filter "name=postgres") 2>/dev/null || true
-            podman rm -f $(podman ps -aq --filter "name=postgres") 2>/dev/null || true
-          fi
+        if [[ "${{ inputs.postgres-enabled }}" == "true" ]]; then
+          podman stop $(podman ps -q --filter "name=postgres") 2>/dev/null || true
+          podman rm -f $(podman ps -aq --filter "name=postgres") 2>/dev/null || true
+        fi
 
-          echo "✅ Cleanup completed"
-        '
+        echo "✅ Cleanup completed"
 
     - name: Create network
       shell: bash
       run: |
-        sudo -u ${{ inputs.user }} bash -c '
-          podman network create ${{ inputs.network-name }} 2>/dev/null || true
-          echo "✅ Network ${{ inputs.network-name }} ready"
-        '
+        podman network create ${{ inputs.network-name }} 2>/dev/null || true
+        echo "✅ Network ${{ inputs.network-name }} ready"
 
     - name: Deploy PostgreSQL
       if: inputs.postgres-enabled == 'true'
       shell: bash
       run: |
-        sudo -u ${{ inputs.user }} bash -c '
-          cd ${{ inputs.deployment-path }}
+        cd ${{ inputs.deployment-path }}
 
-          # Generate password if not provided
+        # Generate password if not provided
           if [[ -z "${{ inputs.postgres-password }}" ]]; then
             POSTGRES_PASSWORD=$(openssl rand -hex 16)
             echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> .env
@@ -100,18 +95,16 @@ runs:
           # Wait for PostgreSQL to be ready
           sleep 15
 
-          echo "✅ PostgreSQL deployed"
-        '
+        echo "✅ PostgreSQL deployed"
 
     - name: Deploy application
       id: deploy
       shell: bash
       run: |
-        sudo -u ${{ inputs.user }} bash -c '
-          # Use user home directory for deployment
-          DEPLOY_PATH="${HOME}/deployments"
-          mkdir -p "${DEPLOY_PATH}"
-          cd "${DEPLOY_PATH}"
+        # Use user home directory for deployment
+        DEPLOY_PATH="${HOME}/deployments"
+        mkdir -p "${DEPLOY_PATH}"
+        cd "${DEPLOY_PATH}"
 
           # Load environment if exists
           [[ -f .env ]] && source .env
@@ -157,5 +150,4 @@ runs:
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "status=deployed" >> $GITHUB_OUTPUT
 
-          echo "✅ Application deployed at $URL"
-        '
+        echo "✅ Application deployed at $URL"
