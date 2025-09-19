@@ -108,9 +108,10 @@ runs:
       shell: bash
       run: |
         sudo -u ${{ inputs.user }} bash -c '
-          # Create deployment path if it doesn't exist
-          mkdir -p ${{ inputs.deployment-path }}
-          cd ${{ inputs.deployment-path }} || cd /home/${{ inputs.user }}
+          # Use user home directory for deployment
+          DEPLOY_PATH="${HOME}/deployments"
+          mkdir -p "${DEPLOY_PATH}"
+          cd "${DEPLOY_PATH}"
 
           # Load environment if exists
           [[ -f .env ]] && source .env
