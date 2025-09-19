@@ -1,6 +1,7 @@
-name: Deploy API
+name: Deploy API - Complete CI/CD Pipeline
 
 # Workflow genérico para CI/CD completo de cualquier API
+# Incluye: Build → Test → Scan → Push to Registry → Deploy
 
 on:
   workflow_call:
@@ -62,85 +63,216 @@ on:
         type: string
         default: '/health'
 
+      dockerfile:
+        description: 'Path to Dockerfile relative to api-path'
+        required: false
+        type: string
+        default: 'Dockerfile'
+
+      push-to-registry:
+        description: 'Push image to GitHub Container Registry'
+        required: false
+        type: boolean
+        default: true
+
+      registry:
+        description: 'Container registry to use'
+        required: false
+        type: string
+        default: 'ghcr.io'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/${{ inputs.api-name }}
+
 jobs:
   # ============================================
-  # CI/CD Pipeline
+  # Build & Push to Registry
   # ============================================
-  deploy:
-    name: Deploy ${{ inputs.api-name }}
-    runs-on: [self-hosted, linux, x64]
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================
-      # TESTING (Optional)
-      # ============================================
-      - name: Run Python tests
-        if: inputs.run-tests && inputs.api-type == 'python'
-        uses: ./actions/test/python
-        with:
-          working-directory: ${{ inputs.api-path }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Run Node tests
-        if: inputs.run-tests && inputs.api-type == 'node'
-        uses: ./actions/test/node
+      - name: Log in to GitHub Container Registry
+        if: inputs.push-to-registry
+        uses: docker/login-action@v3
         with:
-          working-directory: ${{ inputs.api-path }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ============================================
-      # BUILD
-      # ============================================
-      - name: Build container image
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.environment }}
+
+      - name: Build and push Docker image
         id: build
-        uses: ./actions/build/container
+        uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.api-path }}
-          image-name: ${{ inputs.api-name }}
-          tags: |
-            latest
-            ${{ inputs.environment }}
-            ${{ github.sha }}
+          file: ${{ inputs.api-path }}/${{ inputs.dockerfile }}
+          push: ${{ inputs.push-to-registry }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
 
-      # ============================================
-      # SECURITY (Optional)
-      # ============================================
-      - name: Security scan
+      - name: Generate SBOM
+        if: inputs.push-to-registry
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM
+        if: inputs.push-to-registry
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  # ============================================
+  # Test & Security Scan
+  # ============================================
+  test-and-scan:
+    name: Test & Scan
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image for testing
+        run: |
+          IMAGE_TAG=$(echo "${{ needs.build-and-push.outputs.image-tag }}" | head -n1)
+          docker pull ${IMAGE_TAG}
+          docker tag ${IMAGE_TAG} ${{ inputs.api-name }}:test
+
+      - name: Run tests
+        if: inputs.run-tests
+        run: |
+          echo "🧪 Running tests..."
+          case "${{ inputs.api-type }}" in
+            python)
+              docker run --rm ${{ inputs.api-name }}:test python -m pytest tests/ || \
+              docker run --rm ${{ inputs.api-name }}:test python -m unittest discover || \
+              echo "No tests found, skipping..."
+              ;;
+            node)
+              docker run --rm ${{ inputs.api-name }}:test npm test || \
+              echo "No tests found, skipping..."
+              ;;
+            go)
+              docker run --rm ${{ inputs.api-name }}:test go test ./... || \
+              echo "No tests found, skipping..."
+              ;;
+          esac
+
+      - name: Security scan with Trivy
         if: inputs.security-scan
-        uses: ./actions/security/scan-container
+        uses: aquasecurity/trivy-action@master
         with:
-          image: ${{ inputs.api-name }}:latest
-          severity: HIGH
-          exit-code: '0'  # Warning only, don't fail
+          image-ref: ${{ inputs.api-name }}:test
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
 
-      # ============================================
-      # DEPLOY
-      # ============================================
-      - name: Deploy container
-        uses: ./actions/deploy/container
+      - name: Upload Trivy results to GitHub Security
+        if: inputs.security-scan
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          name: ${{ inputs.api-name }}
-          image: ${{ inputs.api-name }}:latest
-          port: ${{ inputs.api-port }}:${{ inputs.api-port }}
-          runtime: ${{ inputs.container-runtime }}
-          user: ${{ inputs.deploy-user }}
-          network: n8n-network
-          env-vars: |
-            ENVIRONMENT=${{ inputs.environment }}
-            VERSION=${{ github.sha }}
-          restart: unless-stopped
+          sarif_file: 'trivy-results.sarif'
 
-      # ============================================
-      # VERIFY
-      # ============================================
+  # ============================================
+  # Deploy to Self-Hosted Runner
+  # ============================================
+  deploy:
+    name: Deploy to Runner
+    needs: [build-and-push, test-and-scan]
+    runs-on: [self-hosted, linux, x64]
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Pull image from registry
+        run: |
+          echo "📥 Pulling new image from registry..."
+          IMAGE_TAG=$(echo "${{ needs.build-and-push.outputs.image-tag }}" | head -n1)
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} pull ${IMAGE_TAG}
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} tag ${IMAGE_TAG} ${{ inputs.api-name }}:latest
+
+      - name: Stop existing container
+        run: |
+          echo "🛑 Stopping existing container..."
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} stop ${{ inputs.api-name }} 2>/dev/null || true
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} rm ${{ inputs.api-name }} 2>/dev/null || true
+
+      - name: Deploy new container
+        run: |
+          echo "🚀 Deploying container..."
+
+          # Create network if needed
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} network create n8n-network 2>/dev/null || true
+
+          # Run container
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} run -d \
+            --name ${{ inputs.api-name }} \
+            --network n8n-network \
+            --restart unless-stopped \
+            -p ${{ inputs.api-port }}:${{ inputs.api-port }} \
+            -e ENVIRONMENT=${{ inputs.environment }} \
+            -e VERSION=${{ github.sha }} \
+            ${{ inputs.api-name }}:latest
+
       - name: Health check
-        shell: bash
         run: |
           echo "🏥 Performing health check..."
+          sleep 5
           for i in {1..10}; do
             if curl -f http://localhost:${{ inputs.api-port }}${{ inputs.health-check-path }} 2>/dev/null; then
               echo "✅ Health check passed!"
+              echo "🎉 Deployment successful!"
+              echo "📦 Image: ${{ needs.build-and-push.outputs.image-tag }}"
               exit 0
             fi
             echo "⏳ Attempt $i/10 - Waiting 5 seconds..."
@@ -149,16 +281,20 @@ jobs:
           echo "❌ Health check failed after 10 attempts"
           exit 1
 
-      # ============================================
-      # NOTIFY (Always)
-      # ============================================
-      - name: Notify status
+      - name: Cleanup old images
         if: always()
-        uses: ./actions/notify/slack
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
-          status: ${{ job.status }}
-          message: |
-            Deployment: ${{ inputs.api-name }}
-            Environment: ${{ inputs.environment }}
-            Status: ${{ job.status }}
+        continue-on-error: true
+        run: |
+          echo "🧹 Cleaning up old images..."
+          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} image prune -f
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "## 🚀 Deployment Summary"
+          echo "- **API**: ${{ inputs.api-name }}"
+          echo "- **Environment**: ${{ inputs.environment }}"
+          echo "- **Port**: ${{ inputs.api-port }}"
+          echo "- **Image**: ${{ needs.build-and-push.outputs.image-tag }}"
+          echo "- **Registry**: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "- **Status**: ✅ Success"

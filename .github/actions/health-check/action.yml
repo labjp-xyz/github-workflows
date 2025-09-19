@@ -1,0 +1,121 @@
+name: 'Health Check'
+description: 'Perform health checks on deployed services'
+author: 'labjp-xyz'
+
+inputs:
+  service-url:
+    description: 'Service URL to check'
+    required: true
+  wait-time:
+    description: 'Time to wait before checking (seconds)'
+    required: false
+    default: '30'
+  max-retries:
+    description: 'Maximum number of retries'
+    required: false
+    default: '5'
+  user:
+    description: 'User for container checks'
+    required: false
+    default: 'n8n'
+  postgres-check:
+    description: 'Check PostgreSQL'
+    required: false
+    default: 'true'
+  app-name:
+    description: 'Application name'
+    required: false
+    default: 'n8n'
+
+outputs:
+  status:
+    description: 'Health check status'
+    value: ${{ steps.check.outputs.status }}
+  services:
+    description: 'Running services'
+    value: ${{ steps.check.outputs.services }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Wait for services
+      shell: bash
+      run: |
+        echo "⏳ Waiting ${{ inputs.wait-time }} seconds for services to start..."
+        sleep ${{ inputs.wait-time }}
+
+    - name: Check PostgreSQL
+      if: inputs.postgres-check == 'true'
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          echo "🔍 Checking PostgreSQL..."
+
+          RETRIES=0
+          MAX_RETRIES=${{ inputs.max-retries }}
+
+          while [ $RETRIES -lt $MAX_RETRIES ]; do
+            if podman exec ${{ inputs.app-name }}-postgres pg_isready -U ${{ inputs.app-name }} 2>/dev/null; then
+              echo "✅ PostgreSQL is ready"
+              break
+            else
+              RETRIES=$((RETRIES+1))
+              echo "⏳ PostgreSQL not ready, retry $RETRIES/$MAX_RETRIES..."
+              sleep 10
+            fi
+          done
+
+          if [ $RETRIES -eq $MAX_RETRIES ]; then
+            echo "❌ PostgreSQL failed to start"
+            podman logs ${{ inputs.app-name }}-postgres --tail=50
+            exit 1
+          fi
+        '
+
+    - name: Check application health
+      id: check
+      shell: bash
+      run: |
+        echo "🔍 Checking application at ${{ inputs.service-url }}/healthz..."
+
+        RETRIES=0
+        MAX_RETRIES=${{ inputs.max-retries }}
+
+        while [ $RETRIES -lt $MAX_RETRIES ]; do
+          if curl -f -s -o /dev/null -w "%{http_code}" "${{ inputs.service-url }}/healthz" | grep -q "200\|204"; then
+            echo "✅ Application is healthy"
+            echo "status=healthy" >> $GITHUB_OUTPUT
+            break
+          else
+            RETRIES=$((RETRIES+1))
+            echo "⏳ Application not ready, retry $RETRIES/$MAX_RETRIES..."
+            sleep 10
+          fi
+        done
+
+        if [ $RETRIES -eq $MAX_RETRIES ]; then
+          echo "❌ Application health check failed"
+
+          # Show logs for debugging
+          sudo -u ${{ inputs.user }} bash -c '
+            echo "📋 Application logs:"
+            podman logs ${{ inputs.app-name }} --tail=50
+          '
+
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Show running services
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          echo "📦 Running containers:"
+          SERVICES=$(podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}")
+          echo "$SERVICES"
+
+          # Set output
+          echo "services<<EOF" >> $GITHUB_OUTPUT
+          echo "$SERVICES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        '

@@ -1,0 +1,158 @@
+name: 'Podman Deploy'
+description: 'Deploy containers using Podman'
+author: 'labjp-xyz'
+
+inputs:
+  deployment-path:
+    description: 'Path where to deploy'
+    required: false
+    default: '/opt/n8n'
+  user:
+    description: 'User to run containers'
+    required: false
+    default: 'n8n'
+  postgres-enabled:
+    description: 'Enable PostgreSQL'
+    required: false
+    default: 'true'
+  postgres-password:
+    description: 'PostgreSQL password'
+    required: false
+  app-image:
+    description: 'Application image to deploy'
+    required: true
+  app-name:
+    description: 'Application container name'
+    required: false
+    default: 'n8n'
+  app-port:
+    description: 'Application port'
+    required: false
+    default: '5678'
+  network-name:
+    description: 'Container network name'
+    required: false
+    default: 'n8n-network'
+
+outputs:
+  deployment-url:
+    description: 'Deployment URL'
+    value: ${{ steps.deploy.outputs.url }}
+  status:
+    description: 'Deployment status'
+    value: ${{ steps.deploy.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Stop existing containers
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          echo "🛑 Stopping existing containers..."
+
+          # Stop and remove existing containers
+          podman stop $(podman ps -q --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
+          podman rm -f $(podman ps -aq --filter "name=${{ inputs.app-name }}") 2>/dev/null || true
+
+          if [[ "${{ inputs.postgres-enabled }}" == "true" ]]; then
+            podman stop $(podman ps -q --filter "name=postgres") 2>/dev/null || true
+            podman rm -f $(podman ps -aq --filter "name=postgres") 2>/dev/null || true
+          fi
+
+          echo "✅ Cleanup completed"
+        '
+
+    - name: Create network
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          podman network create ${{ inputs.network-name }} 2>/dev/null || true
+          echo "✅ Network ${{ inputs.network-name }} ready"
+        '
+
+    - name: Deploy PostgreSQL
+      if: inputs.postgres-enabled == 'true'
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          cd ${{ inputs.deployment-path }}
+
+          # Generate password if not provided
+          if [[ -z "${{ inputs.postgres-password }}" ]]; then
+            POSTGRES_PASSWORD=$(openssl rand -hex 16)
+            echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> .env
+          else
+            POSTGRES_PASSWORD="${{ inputs.postgres-password }}"
+          fi
+
+          echo "🗄️ Starting PostgreSQL..."
+          podman run -d \
+            --name ${{ inputs.app-name }}-postgres \
+            --network ${{ inputs.network-name }} \
+            -e POSTGRES_USER=${{ inputs.app-name }} \
+            -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            -e POSTGRES_DB=${{ inputs.app-name }} \
+            -v postgres_data:/var/lib/postgresql/data \
+            --restart always \
+            docker.io/library/postgres:15-alpine
+
+          # Wait for PostgreSQL to be ready
+          sleep 15
+
+          echo "✅ PostgreSQL deployed"
+        '
+
+    - name: Deploy application
+      id: deploy
+      shell: bash
+      run: |
+        sudo -u ${{ inputs.user }} bash -c '
+          cd ${{ inputs.deployment-path }}
+
+          # Load environment if exists
+          [[ -f .env ]] && source .env
+
+          echo "📦 Pulling image ${{ inputs.app-image }}..."
+          podman pull ${{ inputs.app-image }}
+
+          echo "🚀 Starting ${{ inputs.app-name }}..."
+
+          # Base podman run command
+          PODMAN_CMD="podman run -d \
+            --name ${{ inputs.app-name }} \
+            --network ${{ inputs.network-name }} \
+            -p ${{ inputs.app-port }}:${{ inputs.app-port }} \
+            -v ${{ inputs.app-name }}_data:/home/node/.${{ inputs.app-name }} \
+            --restart always"
+
+          # Add PostgreSQL environment if enabled
+          if [[ "${{ inputs.postgres-enabled }}" == "true" ]]; then
+            PODMAN_CMD="$PODMAN_CMD \
+              -e DB_TYPE=postgresdb \
+              -e DB_POSTGRESDB_HOST=${{ inputs.app-name }}-postgres \
+              -e DB_POSTGRESDB_PORT=5432 \
+              -e DB_POSTGRESDB_DATABASE=${{ inputs.app-name }} \
+              -e DB_POSTGRESDB_USER=${{ inputs.app-name }} \
+              -e DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}"
+          fi
+
+          # Add application-specific environment variables
+          if [[ -f .env ]]; then
+            while IFS= read -r line; do
+              if [[ ! "$line" =~ ^# && -n "$line" ]]; then
+                PODMAN_CMD="$PODMAN_CMD -e $line"
+              fi
+            done < .env
+          fi
+
+          # Execute deployment
+          $PODMAN_CMD ${{ inputs.app-image }}
+
+          # Set outputs
+          URL="http://$(hostname -f):${{ inputs.app-port }}"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "status=deployed" >> $GITHUB_OUTPUT
+
+          echo "✅ Application deployed at $URL"
+        '
