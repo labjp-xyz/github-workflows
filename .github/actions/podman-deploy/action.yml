@@ -108,7 +108,9 @@ runs:
       shell: bash
       run: |
         sudo -u ${{ inputs.user }} bash -c '
-          cd ${{ inputs.deployment-path }}
+          # Create deployment path if it doesn't exist
+          mkdir -p ${{ inputs.deployment-path }}
+          cd ${{ inputs.deployment-path }} || cd /home/${{ inputs.user }}
 
           # Load environment if exists
           [[ -f .env ]] && source .env

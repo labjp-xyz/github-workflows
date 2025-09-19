@@ -57,6 +57,9 @@ on:
       app-secrets:
         description: 'Application secrets (JSON format)'
         required: false
+      github-token:
+        description: 'GitHub token for registry access'
+        required: false
 
 jobs:
   # ============================================
@@ -172,6 +175,10 @@ jobs:
         with:
           repository: labjp-xyz/github-workflows
           path: .github-workflows
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.github-token || github.token }}" | sudo -u ${{ inputs.deploy-user }} podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Deploy application
         id: deploy
