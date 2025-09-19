@@ -163,15 +163,15 @@ jobs:
       deployment-id: ${{ steps.deploy.outputs.deployment-id }}
 
     steps:
-      - name: Checkout deployment scripts
+      - name: Checkout github-workflows repository
         uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            .github/actions
+          repository: labjp-xyz/github-workflows
+          path: .github-workflows
 
       - name: Deploy application
         id: deploy
-        uses: ./.github/actions/podman-deploy
+        uses: ./.github-workflows/.github/actions/podman-deploy
         with:
           deployment-path: ${{ inputs.deployment-path }}
           user: ${{ inputs.app-name }}
@@ -200,15 +200,15 @@ jobs:
       status: ${{ steps.health.outputs.status }}
 
     steps:
-      - name: Checkout actions
+      - name: Checkout github-workflows repository
         uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            .github/actions
+          repository: labjp-xyz/github-workflows
+          path: .github-workflows
 
       - name: Run health checks
         id: health
-        uses: ./.github/actions/health-check
+        uses: ./.github-workflows/.github/actions/health-check
         with:
           service-url: ${{ needs.deploy.outputs.url }}
           wait-time: 30
