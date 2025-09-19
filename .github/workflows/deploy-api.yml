@@ -1,300 +1,185 @@
-name: Deploy API - Complete CI/CD Pipeline
-
-# Workflow genérico para CI/CD completo de cualquier API
-# Incluye: Build → Test → Scan → Push to Registry → Deploy
+name: API Generic CI/CD Pipeline
 
 on:
   workflow_call:
     inputs:
-      api-name:
-        description: 'API name'
+      # Application Configuration
+      app-name:
+        description: 'Application name'
+        type: string
         required: true
+      app-port:
+        description: 'Application port'
         type: string
-
-      api-path:
-        description: 'API source path'
         required: true
-        type: string
 
-      api-type:
-        description: 'API type (python, node, go)'
-        required: true
+      # CI Configuration
+      skip-build:
+        description: 'Skip build stage (use existing image)'
+        type: boolean
+        default: false
+      dockerfile-path:
+        description: 'Path to Dockerfile'
         type: string
-
-      api-port:
-        description: 'API port'
-        required: false
+        default: './Dockerfile'
+      platforms:
+        description: 'Target platforms for build'
         type: string
-        default: '3000'
+        default: 'linux/amd64'
+      run-tests:
+        description: 'Run tests during CI'
+        type: boolean
+        default: true
+      run-security-scan:
+        description: 'Run security scan'
+        type: boolean
+        default: true
 
+      # CD Configuration
       environment:
-        description: 'Environment (development, staging, production)'
-        required: false
+        description: 'Deployment environment'
         type: string
         default: 'production'
-
-      run-tests:
-        description: 'Run tests before deploy'
-        required: false
+      image-tag:
+        description: 'Image tag to deploy (when skip-build=true)'
+        type: string
+        default: 'latest'
+      deployment-path:
+        description: 'Server deployment path'
+        type: string
+        default: '/opt/apps'
+      postgres-enabled:
+        description: 'Deploy with PostgreSQL'
         type: boolean
-        default: true
-
-      security-scan:
-        description: 'Run security scan'
-        required: false
+        default: false
+      runner-labels:
+        description: 'Runner labels in JSON array format'
+        type: string
+        default: '["self-hosted"]'
+      deploy-only:
+        description: 'Only run deployment (skip CI)'
         type: boolean
-        default: true
-
-      deploy-user:
-        description: 'User to run the deployment (e.g., n8n-work)'
+        default: false
+    secrets:
+      github-token:
+        description: 'GitHub token for registry'
+        required: true
+      postgres-password:
+        description: 'PostgreSQL password (if postgres-enabled)'
         required: false
-        type: string
-        default: 'n8n-work'
-
-      container-runtime:
-        description: 'Container runtime (docker or podman)'
+      app-secrets:
+        description: 'Application secrets in JSON format'
         required: false
-        type: string
-        default: 'podman'
-
-      health-check-path:
-        description: 'Health check endpoint path'
-        required: false
-        type: string
-        default: '/health'
-
-      dockerfile:
-        description: 'Path to Dockerfile relative to api-path'
-        required: false
-        type: string
-        default: 'Dockerfile'
-
-      push-to-registry:
-        description: 'Push image to GitHub Container Registry'
-        required: false
-        type: boolean
-        default: true
-
-      registry:
-        description: 'Container registry to use'
-        required: false
-        type: string
-        default: 'ghcr.io'
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/${{ inputs.api-name }}
 
 jobs:
   # ============================================
-  # Build & Push to Registry
+  # DECISION GATE
   # ============================================
-  build-and-push:
-    name: Build & Push
+  decide:
+    name: 🎯 Pipeline Decision
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
+      run-ci: ${{ steps.decide.outputs.run-ci }}
+      run-cd: ${{ steps.decide.outputs.run-cd }}
+      image-to-deploy: ${{ steps.decide.outputs.image }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Determine pipeline path
+        id: decide
+        run: |
+          echo "🎯 Determining pipeline for ${{ inputs.app-name }}..."
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        if: inputs.push-to-registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ inputs.environment }}
-
-      - name: Build and push Docker image
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: ${{ inputs.api-path }}
-          file: ${{ inputs.api-path }}/${{ inputs.dockerfile }}
-          push: ${{ inputs.push-to-registry }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-      - name: Generate SBOM
-        if: inputs.push-to-registry
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-
-      - name: Upload SBOM
-        if: inputs.push-to-registry
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.spdx.json
+          if [[ "${{ inputs.deploy-only }}" == "true" ]]; then
+            echo "run-ci=false" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "image=ghcr.io/${{ github.repository_owner }}/${{ inputs.app-name }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+            echo "📦 Deploy-only mode"
+          elif [[ "${{ inputs.skip-build }}" == "true" ]]; then
+            echo "run-ci=false" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "image=ghcr.io/${{ github.repository_owner }}/${{ inputs.app-name }}:${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+            echo "⏭️ Skip-build mode"
+          else
+            echo "run-ci=true" >> $GITHUB_OUTPUT
+            echo "run-cd=true" >> $GITHUB_OUTPUT
+            echo "🔨 Full CI/CD pipeline"
+          fi
 
   # ============================================
-  # Test & Security Scan
+  # CI PIPELINE (Generic for any containerized app)
   # ============================================
-  test-and-scan:
-    name: Test & Scan
-    needs: build-and-push
+  ci:
+    name: 🔨 CI Pipeline
+    needs: decide
+    if: needs.decide.outputs.run-ci == 'true'
+    uses: ./.github/workflows/ci-generic.yml
+    with:
+      dockerfile-path: ${{ inputs.dockerfile-path }}
+      platforms: ${{ inputs.platforms }}
+      push-image: true
+      run-tests: ${{ inputs.run-tests }}
+      run-security-scan: ${{ inputs.run-security-scan }}
+      image-name: ${{ github.repository_owner }}/${{ inputs.app-name }}
+    secrets:
+      registry-token: ${{ secrets.github-token }}
+
+  # ============================================
+  # CD PIPELINE (Generic deployment)
+  # ============================================
+  cd:
+    name: 🚀 CD Pipeline
+    needs: [decide, ci]
+    if: |
+      always() &&
+      needs.decide.outputs.run-cd == 'true' &&
+      (needs.ci.result == 'success' || needs.ci.result == 'skipped')
+    uses: ./.github/workflows/cd-deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image: ${{ needs.ci.outputs.image || needs.decide.outputs.image-to-deploy }}
+      deployment-path: ${{ inputs.deployment-path }}/${{ inputs.app-name }}
+      app-name: ${{ inputs.app-name }}
+      app-port: ${{ inputs.app-port }}
+      postgres-enabled: ${{ inputs.postgres-enabled }}
+      runner-labels: ${{ inputs.runner-labels }}
+      health-check-enabled: true
+      rollback-on-failure: ${{ inputs.environment == 'production' }}
+    secrets:
+      postgres-password: ${{ secrets.postgres-password }}
+      app-secrets: ${{ secrets.app-secrets }}
+
+  # ============================================
+  # SUMMARY
+  # ============================================
+  summary:
+    name: 📊 Pipeline Summary
+    needs: [ci, cd]
+    if: always()
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-      security-events: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull image for testing
+      - name: Generate summary
         run: |
-          IMAGE_TAG=$(echo "${{ needs.build-and-push.outputs.image-tag }}" | head -n1)
-          docker pull ${IMAGE_TAG}
-          docker tag ${IMAGE_TAG} ${{ inputs.api-name }}:test
+          echo "# 📊 ${{ inputs.app-name }} Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-      - name: Run tests
-        if: inputs.run-tests
-        run: |
-          echo "🧪 Running tests..."
-          case "${{ inputs.api-type }}" in
-            python)
-              docker run --rm ${{ inputs.api-name }}:test python -m pytest tests/ || \
-              docker run --rm ${{ inputs.api-name }}:test python -m unittest discover || \
-              echo "No tests found, skipping..."
-              ;;
-            node)
-              docker run --rm ${{ inputs.api-name }}:test npm test || \
-              echo "No tests found, skipping..."
-              ;;
-            go)
-              docker run --rm ${{ inputs.api-name }}:test go test ./... || \
-              echo "No tests found, skipping..."
-              ;;
-          esac
+          # CI Summary
+          if [[ "${{ needs.ci.result }}" == "success" ]]; then
+            echo "## ✅ CI: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- Image: ${{ needs.ci.outputs.image }}" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.ci.result }}" == "skipped" ]]; then
+            echo "## ⏭️ CI: SKIPPED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ CI: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
 
-      - name: Security scan with Trivy
-        if: inputs.security-scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ inputs.api-name }}:test
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Upload Trivy results to GitHub Security
-        if: inputs.security-scan
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-  # ============================================
-  # Deploy to Self-Hosted Runner
-  # ============================================
-  deploy:
-    name: Deploy to Runner
-    needs: [build-and-push, test-and-scan]
-    runs-on: [self-hosted, linux, x64]
-    environment: ${{ inputs.environment }}
-
-    steps:
-      - name: Log in to GitHub Container Registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-
-      - name: Pull image from registry
-        run: |
-          echo "📥 Pulling new image from registry..."
-          IMAGE_TAG=$(echo "${{ needs.build-and-push.outputs.image-tag }}" | head -n1)
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} pull ${IMAGE_TAG}
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} tag ${IMAGE_TAG} ${{ inputs.api-name }}:latest
-
-      - name: Stop existing container
-        run: |
-          echo "🛑 Stopping existing container..."
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} stop ${{ inputs.api-name }} 2>/dev/null || true
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} rm ${{ inputs.api-name }} 2>/dev/null || true
-
-      - name: Deploy new container
-        run: |
-          echo "🚀 Deploying container..."
-
-          # Create network if needed
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} network create n8n-network 2>/dev/null || true
-
-          # Run container
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} run -d \
-            --name ${{ inputs.api-name }} \
-            --network n8n-network \
-            --restart unless-stopped \
-            -p ${{ inputs.api-port }}:${{ inputs.api-port }} \
-            -e ENVIRONMENT=${{ inputs.environment }} \
-            -e VERSION=${{ github.sha }} \
-            ${{ inputs.api-name }}:latest
-
-      - name: Health check
-        run: |
-          echo "🏥 Performing health check..."
-          sleep 5
-          for i in {1..10}; do
-            if curl -f http://localhost:${{ inputs.api-port }}${{ inputs.health-check-path }} 2>/dev/null; then
-              echo "✅ Health check passed!"
-              echo "🎉 Deployment successful!"
-              echo "📦 Image: ${{ needs.build-and-push.outputs.image-tag }}"
-              exit 0
-            fi
-            echo "⏳ Attempt $i/10 - Waiting 5 seconds..."
-            sleep 5
-          done
-          echo "❌ Health check failed after 10 attempts"
-          exit 1
-
-      - name: Cleanup old images
-        if: always()
-        continue-on-error: true
-        run: |
-          echo "🧹 Cleaning up old images..."
-          sudo -u ${{ inputs.deploy-user }} ${{ inputs.container-runtime }} image prune -f
-
-      - name: Deployment summary
-        if: success()
-        run: |
-          echo "## 🚀 Deployment Summary"
-          echo "- **API**: ${{ inputs.api-name }}"
-          echo "- **Environment**: ${{ inputs.environment }}"
-          echo "- **Port**: ${{ inputs.api-port }}"
-          echo "- **Image**: ${{ needs.build-and-push.outputs.image-tag }}"
-          echo "- **Registry**: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          echo "- **Status**: ✅ Success"
+          # CD Summary
+          if [[ "${{ needs.cd.result }}" == "success" ]]; then
+            echo "## ✅ CD: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+            echo "- URL: ${{ needs.cd.outputs.deployment-url }}" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.cd.result }}" == "skipped" ]]; then
+            echo "## ⏭️ CD: SKIPPED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ CD: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi

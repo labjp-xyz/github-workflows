@@ -16,9 +16,32 @@ Centralized repository for reusable GitHub Actions workflows and composite actio
 
 ## Available Workflows
 
-### deploy-n8n.yml
+### Core Workflows (Reusable Components)
 
+#### ci-generic.yml
+Generic CI workflow for any containerized application.
+- Build Docker images
+- Run tests
+- Security scanning with Trivy
+- Push to GitHub Container Registry
+- Quality gates
+
+#### cd-deploy.yml
+Generic CD workflow for application deployment.
+- Pre-deployment checks
+- Database backups (production)
+- Podman/Docker deployment
+- Health checks
+- Automatic rollback on failure
+- Post-deployment notifications
+
+### Application-Specific Workflows
+
+#### deploy-n8n.yml
 Complete CI/CD pipeline for n8n deployment with PostgreSQL.
+
+#### deploy-api.yml
+Generic API deployment pipeline using the core CI/CD workflows.
 
 #### Features
 - 🔨 **Build Stage**: Multi-platform Docker image builds

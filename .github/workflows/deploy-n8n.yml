@@ -95,7 +95,7 @@ jobs:
     name: 🔨 CI Pipeline
     needs: decide
     if: needs.decide.outputs.run-ci == 'true'
-    uses: ./.github/workflows/ci-build.yml
+    uses: ./.github/workflows/ci-generic.yml
     with:
       dockerfile-path: ${{ inputs.dockerfile-path }}
       platforms: ${{ inputs.platforms }}
