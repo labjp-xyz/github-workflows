@@ -39,6 +39,10 @@ on:
         description: 'Rollback on deployment failure'
         type: boolean
         default: true
+      deploy-user:
+        description: 'User to run deployment (e.g., n8n-work)'
+        type: string
+        default: 'n8n-work'
     outputs:
       deployment-url:
         description: 'Application URL'
@@ -174,7 +178,7 @@ jobs:
         uses: ./.github-workflows/.github/actions/podman-deploy
         with:
           deployment-path: ${{ inputs.deployment-path }}
-          user: ${{ inputs.app-name }}
+          user: ${{ inputs.deploy-user }}
           postgres-enabled: ${{ inputs.postgres-enabled }}
           postgres-password: ${{ secrets.postgres-password }}
           app-image: ${{ inputs.image }}

@@ -60,6 +60,10 @@ on:
         description: 'Only run deployment (skip CI)'
         type: boolean
         default: false
+      deploy-user:
+        description: 'User to run deployment'
+        type: string
+        default: 'n8n-work'
     secrets:
       github-token:
         description: 'GitHub token for registry'
@@ -145,6 +149,7 @@ jobs:
       runner-labels: ${{ inputs.runner-labels }}
       health-check-enabled: true
       rollback-on-failure: ${{ inputs.environment == 'production' }}
+      deploy-user: ${{ inputs.deploy-user }}
     secrets:
       postgres-password: ${{ secrets.postgres-password }}
       app-secrets: ${{ secrets.app-secrets }}
