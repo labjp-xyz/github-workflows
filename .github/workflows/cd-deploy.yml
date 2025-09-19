@@ -191,7 +191,7 @@ jobs:
           app-image: ${{ inputs.image }}
           app-name: ${{ inputs.app-name }}
           app-port: ${{ inputs.app-port }}
-          network-name: ${{ inputs.app-name }}-network
+          network-name: n8n-network
 
       - name: Set deployment ID
         run: |
@@ -273,7 +273,7 @@ jobs:
           if $CONTAINER_RUNTIME image exists ${{ inputs.app-name }}:rollback; then
             $CONTAINER_RUNTIME run -d \
               --name ${{ inputs.app-name }} \
-              --network ${{ inputs.app-name }}-network \
+              --network n8n-network \
               -p ${{ inputs.app-port }}:${{ inputs.app-port }} \
               --restart always \
               ${{ inputs.app-name }}:rollback
